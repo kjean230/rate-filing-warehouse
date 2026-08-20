@@ -15,6 +15,7 @@ The rules, in the order they apply:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import urllib.robotparser
@@ -33,6 +34,10 @@ log = logging.getLogger(__name__)
 BROWSER_UA_TOKENS = ("mozilla", "chrome", "safari", "firefox", "edge", "webkit", "opera")
 
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504, 507, 509})
+
+# SharePoint REST negotiates to Atom XML by default. nometadata trims the response to
+# the fields actually selected.
+JSON_ACCEPT = "application/json;odata=nometadata"
 
 
 def assert_honest_user_agent(user_agent: str) -> None:
@@ -160,6 +165,7 @@ class PoliteClient:
         url: str,
         etag: str | None = None,
         last_modified: str | None = None,
+        accept: str | None = None,
     ) -> FetchResult:
         """Retrieve one document.
 
@@ -170,6 +176,8 @@ class PoliteClient:
         self.check_allowed(url)
 
         headers: dict[str, str] = {}
+        if accept:
+            headers["Accept"] = accept
         if etag:
             headers["If-None-Match"] = etag
         if last_modified:
@@ -222,13 +230,18 @@ class PoliteClient:
                 pass  # HTTP-date form; the exponential delay is a fine substitute
         self._sleep(delay)
 
-    def get_json(self, url: str) -> object:
-        result = self.fetch(url)
+    def get_json(self, url: str, accept: str = JSON_ACCEPT) -> object:
+        """SharePoint REST returns Atom XML unless an explicit JSON Accept is sent."""
+        result = self.fetch(url, accept=accept)
         if result.content is None:
             raise FetchError(url, result.attempts, "unexpected 304 on a non-conditional request")
-        import json
-
-        return json.loads(result.content)
+        try:
+            return json.loads(result.content)
+        except json.JSONDecodeError as exc:
+            content_type = result.header("content-type") or "unknown"
+            raise FetchError(
+                url, result.attempts, f"expected JSON, got content-type {content_type}: {exc}"
+            ) from exc
 
     def get_text(self, url: str) -> str:
         result = self.fetch(url)
