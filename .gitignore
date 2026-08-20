@@ -222,3 +222,7 @@ __marimo__/
 # manifest on a clean clone would report "unchanged" for bytes that do not exist.
 # Ingest is the populating step. See docs/decisions/0003-manifest-format.md.
 data/
+
+# Session handoff notes. Local scratch for continuing work across sessions,
+# never committed — they capture live-run observations, not repo state.
+.claude/handoff/

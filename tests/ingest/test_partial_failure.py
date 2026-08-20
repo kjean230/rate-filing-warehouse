@@ -255,6 +255,34 @@ def test_summary_reports_counts_roles_and_exit(ingest_config, make_client):
     assert "19 run directories, 30 files" in summary
     assert "manifest: 30 rows" in summary
     assert "exit: 0" in summary
+    # bytes_stored, not bytes: --force-fetch transfers every document and may
+    # still store nothing, so the bare label overstated what a run had written.
+    assert "bytes_stored=" in summary
+    assert "  bytes=" not in summary
+
+
+def test_force_fetch_summary_reports_zero_bytes_stored_despite_transferring(
+    ingest_config, make_client
+):
+    """The label has to survive the case that motivated it."""
+    do_run(ingest_config, make_client)
+    result = do_run(ingest_config, make_client, force_fetch=True)
+    summary = format_summary(
+        result, RawStore(ingest_config.data_root), Manifest(ingest_config.data_root), False
+    )
+    assert "bytes_stored=0" in summary
+    assert "unchanged=15" in summary
+
+
+def test_each_state_is_described_exactly_once_per_run(ingest_config, make_client, caplog):
+    """discover() logs the resolved counts; the caller must not log them again."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="pipeline.ingest.adapters.pennsylvania"):
+        do_run(ingest_config, make_client, states=["PA"], dry_run=True)
+
+    described = [r for r in caplog.records if "filing(s)" in r.getMessage()]
+    assert len(described) == 1, f"expected one describe() line, got {len(described)}"
 
 
 def test_dry_run_resolves_without_fetching_anything(ingest_config, make_client, sources):
