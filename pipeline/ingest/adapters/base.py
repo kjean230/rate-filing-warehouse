@@ -34,6 +34,11 @@ class DocumentRef:
     # The source's own opaque handle. Never a URL — see ADR 0003.
     source_item_key: str | None = None
 
+    # The average rate change the source posts next to the documents, verbatim.
+    # Oregon's SharePoint list carries it; Pennsylvania's DAM index does not. See
+    # ADR 0011 and the note on ManifestRow.avg_rate_request_posted.
+    avg_rate_request_posted: str | None = None
+
     # Raw link label as posted, kept when it did not map to a known role so an
     # unrecognized document is ingested rather than dropped.
     raw_label: str | None = None

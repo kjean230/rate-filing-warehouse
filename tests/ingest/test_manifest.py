@@ -51,6 +51,9 @@ ADDED_FOR_PHASE_5 = (
     "manifest_schema_version",
 )
 
+# Added at schema v2 for Phase 3's Oregon cross-source check. See ADR 0011.
+ADDED_FOR_PHASE_3 = ("avg_rate_request_posted",)
+
 
 def make_row(**overrides) -> ManifestRow:
     base = dict(
@@ -73,7 +76,7 @@ def make_row(**overrides) -> ManifestRow:
 
 def test_every_specified_field_is_present():
     row = json.loads(make_row().to_json())
-    for field in REQUIRED_BY_SPEC + ADDED_FOR_PHASE_5:
+    for field in REQUIRED_BY_SPEC + ADDED_FOR_PHASE_5 + ADDED_FOR_PHASE_3:
         assert field in row, f"manifest row is missing {field}"
 
 
@@ -99,6 +102,57 @@ def test_nulls_are_explicit_never_omitted():
 
 def test_schema_version_is_stamped():
     assert json.loads(make_row().to_json())["manifest_schema_version"] == MANIFEST_SCHEMA_VERSION
+
+
+# -- schema v2 -------------------------------------------------------------
+#
+# The log is append-only ACROSS phases, so a v2 bump does not migrate the rows
+# already on disk — it creates a version boundary inside one file. These tests pin
+# that the boundary is legible, which is the entire justification for carrying a
+# `manifest_schema_version` column at all (ADR 0003, ADR 0011).
+
+
+def test_v2_carries_the_posted_rate_and_v1_rows_are_not_rewritten(tmp_path):
+    """A v1 row and a v2 row coexist, and each reads as what it is.
+
+    The v1 row must not be readable as `avg_rate_request_posted: null`. "The source
+    posted nothing" and "this row predates the column" are different facts, and
+    collapsing them is the same error ADR 0003 refused when it kept `unchanged:
+    true` rows rather than recording only changes.
+    """
+    manifest = Manifest(tmp_path)
+
+    legacy = json.loads(make_row().to_json())
+    legacy["manifest_schema_version"] = 1
+    del legacy["avg_rate_request_posted"]
+    manifest.path.parent.mkdir(parents=True, exist_ok=True)
+    manifest.path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+
+    manifest.append(make_row(avg_rate_request_posted="11.7%"))
+
+    old, new = list(manifest.read_rows())
+    assert old["manifest_schema_version"] == 1
+    assert "avg_rate_request_posted" not in old  # absent, not null
+    assert new["manifest_schema_version"] == 2
+    assert new["avg_rate_request_posted"] == "11.7%"
+
+
+def test_the_posted_rate_is_stored_verbatim_not_parsed():
+    """Oregon posts '11.7%', '25%' and '12.2%' — inconsistent precision is a fact.
+
+    Normalizing at ingest would decide a rounding question that belongs to whoever
+    compares this against the 11.71% the PDF anchor reads.
+    """
+    for posted in ("11.7%", "25%", "12.2%"):
+        row = json.loads(make_row(avg_rate_request_posted=posted).to_json())
+        assert row["avg_rate_request_posted"] == posted
+
+
+def test_pennsylvania_rows_carry_no_posted_rate():
+    """PA's DAM index publishes no such field. Null is the honest value there."""
+    row = json.loads(make_row(state="PA", document_role="filing_packet").to_json())
+    assert row["avg_rate_request_posted"] is None
+    assert "avg_rate_request_posted" in row  # explicit null, never omitted
 
 
 # -- retrieved_at format ---------------------------------------------------
