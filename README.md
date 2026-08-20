@@ -16,7 +16,8 @@ holds exactly one annual filing cycle). See `docs/source-recon.md` §9.
 | 0 — Source recon | ✅ Complete, approved 2026-08-20 — `docs/source-recon.md` |
 | 1 — Raw ingest | ✅ Gate passed — see below |
 | 2 — Extraction | ✅ Gate passed (awaiting approval) — see below |
-| 3–6 | Not started |
+| 3 — DQ + quarantine | ✅ Gate passed (awaiting approval) — see below |
+| 4–6 | Not started |
 
 ## Phase 1 — raw ingest
 
@@ -135,6 +136,83 @@ Section targeting is what makes that cost possible: Moda's rate request alone ex
 ~1.1M tokens and **does not fit in the context window**, so whole-document extraction is
 not an expensive option here — it is an impossible one.
 
+## Phase 3 — DQ + quarantine
+
+Rule-level validation over the extracted rows, with a quarantine store in which every
+row names the rule that failed.
+
+### Run
+
+```bash
+python -m pipeline.validate                          # validate the current extract
+python -m pipeline.validate --reprocess extracted    # re-run the rules, new run_id
+python -m pipeline.validate --reprocess raw          # re-extract from stored bytes, then validate
+python -m pipeline.validate --filing pa-2027-indv-gqo  # one filing, gate not asserted
+```
+
+Exit codes continue ADR 0004's vocabulary: `0` clean, `1` at least one
+error-severity violation, `2` reserved, `3` the gate itself failed. `warn`
+violations do not fail the run — 417 Pennsylvania rows with no rate change are known
+debt, and failing on it every time would train the exit code to be ignored.
+
+### The rules are not one kind of check
+
+There is no single validation situation here, and writing `config/dq_rules.yml` as
+if there were produces rules that cannot fire or fire on the wrong thing. Every rule
+declares a `kind`, and **a `cross_source` rule scoped to a grain and state with only
+one source refuses to load.**
+
+| Situation | What is actually checkable |
+| --- | --- |
+| Oregon plan rows | **Internal** consistency — the URRT states both the inputs and the result of its own calibration (3.11 × 3.12 × 3.13 × 3.14 = 3.15). Not a second source. |
+| Pennsylvania plan rows | Internal only — every rate inside the carrier's own stated range, where the carrier states one (8 of 15 do), plus a degeneracy test where none is stated. |
+| Oregon filing grain | The **one** place two independently obtained values of the same field exist — and where the state's list API publishes a figure independent of any document. |
+| Narrative rows | Grounding only. A narrative cannot be reconciled against a number. |
+
+`docs/source-recon.md` §4 and [ADR 0007](docs/decisions/0007-py2026-backtest-scope.md)
+both describe a plan-grain cross-source check in Oregon. **It does not exist**, and
+the obvious construction of it is wrong: the rate request PDF's `% Change` column is
+the change in the plan's *base rate*, not URRT field 1.11 — measured, 0 of 17
+parseable rows agree. See [ADR 0008](docs/decisions/0008-dq-rule-taxonomy.md).
+
+### The gate — every quarantined row names a rule
+
+Six assertions in `assert_dq_gate()`, each with a test that breaks it on purpose. The
+one worth naming: **every configured rule must produce a result row.** A rule that
+did not run is a gap, not a pass — without that assertion, a mistyped scope produces
+a run that passes with less coverage than it claims.
+
+### Measured on the current corpus
+
+| | |
+| --- | --- |
+| Rules | 19, over 12 predicate families |
+| Quarantined | 607 rows — 545 found here, **62 adopted** from extraction rather than rediscovered |
+| Oregon calibration identity | 55 of 66 evaluable, **0 violations**, worst relative error 1.4 × 10⁻⁵ |
+| Oregon category ⟺ zero rate | 66 / 66, both directions |
+| **PA rates that are degenerate** | **108** — `ah` (16 × 11.30%), `ahs` (24 × 13.10%), `upmchn` (68 × 10.90%) |
+| PA rows with no rate at all | 417, across 8 carriers (`warn`) |
+| Metal / AV band | 1 violation — a genuine defect in a filed workbook |
+
+**The degeneracy rule is the one check that finds something nothing else can.** An
+identical rate on every plan in a filing is the signature of a filing-level average
+lifted from a summary row — the `ghp` failure (54 plans at 2.00%), which was caught
+only because that carrier states a range. So the honest count is **56 Pennsylvania
+plan rows carrying a plausibly plan-varying rate change, not 166.**
+
+**"Every violation names a rule" is an attribution property, not a correctness
+claim.** It guarantees no row is quarantined without a reason and no rule fails
+silently. It does not guarantee the rules are the right rules, or that a row passing
+every rule is correct — the same distinction Phase 2 draws about "zero silent drops".
+
+### Layout
+
+```
+data/validated/_log/quarantine.jsonl    # one row per violation; every row names a rule
+data/validated/_log/dq_results.jsonl    # one row per (run, rule) — a rule that did not run is a gap
+config/dq_rules.yml                     # rules, sources_at_grain, adopted_reasons
+```
+
 ## Decisions
 
 | ADR | Subject |
@@ -146,6 +224,10 @@ not an expensive option here — it is an impossible one.
 | [0005](docs/decisions/0005-extraction-targets-and-section-location.md) | Deterministic-first extraction; section targets corrected against the corpus |
 | [0006](docs/decisions/0006-extraction-output-contract.md) | The output contract: what "zero silent drops" means mechanically |
 | [0007](docs/decisions/0007-py2026-backtest-scope.md) | No PY2027 PUF — plan grain arrives two ways, not three |
+| [0008](docs/decisions/0008-dq-rule-taxonomy.md) | Rule kinds; a rule that cannot fire refuses to load; the Phase 2 / Phase 3 line |
+| [0009](docs/decisions/0009-quarantine-store.md) | The quarantine store: mark don't move, summarize don't enumerate |
+| [0010](docs/decisions/0010-reprocess-scope.md) | Reprocess from extracted rows and raw bytes, never from source |
+| [0011](docs/decisions/0011-manifest-schema-v2.md) | Manifest schema v2 — Oregon's posted average rate change |
 
 ## Legal posture
 
