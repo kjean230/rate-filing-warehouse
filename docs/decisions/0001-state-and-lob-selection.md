@@ -3,6 +3,10 @@
 **Status:** Accepted — 2026-08-20
 **Evidence base:** `docs/source-recon.md`, cited by section. Not restated here.
 **Supersedes:** the `TBD` placeholders in the `CLAUDE.md` scope fence.
+**Amended in part by:** [ADR 0007](0007-py2026-backtest-scope.md) — §3's claim that plan
+grain "arrives three independent ways" does not hold for PY2027, because no PY2027 PUF
+exists. The *decision* (plan grain as the fact grain) is unaffected and stands; only the
+count of corroborating sources is corrected. See §3 below.
 
 ## Context
 
@@ -71,6 +75,18 @@ Plan grain is **the native grain of URRT Worksheet 2** — a regulatory artifact
 already exists at this grain — not a decomposition invented to inflate the table. It
 arrives three independent ways: the CMS PUF `WKSH2` CSV, Oregon's posted URRT XLSM, and
 PDF extraction. That triangulation *is* the Phase 3 DQ story.
+
+> **Amended at Phase 2 (ADR 0007).** The paragraph above is wrong for the plan year this
+> project actually covers. **There is no PY2027 PUF** — releases stop at PY2026 (§5), a
+> fact ADR 0002 already depends on. For PY2027 plan grain arrives **two** ways in Oregon
+> (URRT XLSM + PDF) and **one** in Pennsylvania (PDF only; PA publishes no URRT), and
+> Pennsylvania is ~80% of the fact table. Pennsylvania's check is internal rather than
+> independent: every extracted plan rate must sit inside the carrier's own stated range,
+> which is implemented and already rejecting wrong values.
+>
+> The decision this section makes — **plan grain is the fact grain** — is unaffected. It
+> rested on plan grain being the native grain of a regulatory artifact, which is still
+> true. Only the corroboration count is corrected.
 
 This depends on the ID-stability finding: an amendment **updates** a filing rather than
 creating a new one, so plan rows can be revised in place across retrievals. Two primary

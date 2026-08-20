@@ -6,6 +6,41 @@
 
 ---
 
+## ⚠ Corrections found at Phase 2 — read before citing §4, §8 risk 6, or §9
+
+**This document is not being rewritten.** It is approved Phase 0 output and its value is
+as a record of what was probed and concluded on 2026-08-20. Two of its conclusions were
+falsified by the retrieved documents themselves, and are corrected in ADRs rather than
+edited in place. The probes, quotes, status codes and rejections are all unaffected.
+
+**1. The section targets named in §4 and §8 risk 6 do not exist in this corpus.**
+Both sections direct Phase 2 to target §1.4 "Proposed Rate Change(s)", **§1.5 "Reason for
+Rate Change(s)"**, §1.6 "Historical Financial Performance", and Part II. Measured across
+all 26 retrieved PDFs: `Reason for Rate Change` appears **0 times**, `Written Explanation`
+**0 times**, `Part II` twice in one packet. That numbering belongs to the older CMS Part II
+Written Explanation template. PY2027 Oregon memoranda number `4.x` per the 2027 Unified
+Rate Review Instructions; Pennsylvania numbers `1.x` under Department guidance and files
+the Department's standardized **PA Rate Template** exhibits.
+→ The narrative §8 risk 6 wants is real and was found. The heading names are wrong.
+→ **[ADR 0005](decisions/0005-extraction-targets-and-section-location.md)**
+
+**2. "Plan grain is available three independent ways" (§4) does not hold for PY2027.**
+This document says so itself in §5: *"Releases also run PY2014 → PY2026 only; there is no
+PY2027 PUF."* ADR 0002 already relies on that fact. For PY2027, plan grain arrives **two**
+ways in Oregon (posted URRT XLSM + PDF extraction) and **one** in Pennsylvania (PDF only —
+PA publishes no URRT). Pennsylvania is ~80% of the fact table and has no independent
+second source; its check is internal, against the carrier's own stated rate range.
+→ §9's instruction to *"lead with the federal cross-check"* and to claim validation
+*"against federal URRT data"* **overstates what PY2027 supports.**
+→ **[ADR 0007](decisions/0007-py2026-backtest-scope.md)**
+
+**Confirmed rather than corrected:** §8 risk 6's warning that "naive extraction will
+silently produce garbage" is true and has a named victim — `pa-2027-indv-oscar` carries
+zero WinAnsi fonts and ten Identity-H CID fonts, and a byte-level extractor returns
+nothing usable from a 90-page filing.
+
+---
+
 ## 1. Scope & method
 
 ### What was investigated
@@ -267,6 +302,11 @@ metal level, on/off exchange, rating area, market, review status. That is defens
 
 Plan grain is not a stretch or a fabrication. **It is the native grain of URRT
 Worksheet 2**, and it is available three independent ways:
+
+> ⚠ **Corrected at Phase 2 — not true for PY2027.** Source 1 below does not exist for this
+> plan year (see §5: releases stop at PY2026). Oregon has two sources, Pennsylvania has
+> one. See the corrections banner at the top of this file and
+> [ADR 0007](decisions/0007-py2026-backtest-scope.md).
 
 1. **CMS PUF `PUF_WKSH2` CSV** — 84,491 rows nationally, 73 columns. Carries `PLAN_ID`,
    `PROD_ID`, `PLAN_NAME`, `METAL`, `EXCHANGE`, `CUR_ENR`, `CUR_RATE_PMPM`,
@@ -653,6 +693,15 @@ mandatory and naive extraction will silently produce garbage.** PA packets are 1
 or Phase 2 token cost will be dominated by rate tables already available structured in
 the URRT.
 
+> ⚠ **Corrected at Phase 2.** The *instruction* is right and was followed. The *section
+> names* are wrong: `Reason for Rate Change` appears **0 times** across all 26 retrieved
+> PDFs, and `Part II` twice in one packet. Oregon numbers `4.x` per the 2027 URR
+> Instructions; PA numbers `1.x` and files the Department's standardized Rate Template.
+> The page figure is also low — PA packets run **80–409 pages**, not 122.
+> The warning itself is confirmed: `pa-2027-indv-oscar` is entirely Identity-H CID fonts
+> and yields nothing to a byte-level extractor.
+> See [ADR 0005](decisions/0005-extraction-targets-and-section-location.md).
+
 **7. Either selected source could adopt the Vermont/Colorado posture at any time.**
 Two of eleven candidates already 403 honest clients on what appears to be a shared CDN
 configuration. If PA or OR flips, **the pipeline stops — and the correct response is to
@@ -694,6 +743,33 @@ dimensions.
 (PUF CSV, Oregon's URRT workbook, PDF extraction) is a genuine data-quality story and
 the most defensible thing here. It is a claim about **rigour**, which the evidence
 supports — not a claim about **scale**, which it does not.
+
+> ⚠ **Corrected at Phase 2 — this is the one correction that matters most, because this
+> section exists to keep the project's language honest and currently does the opposite.**
+>
+> There is no PY2027 PUF (§5). "Three independent sources at the same grain" is not
+> available for the plan year this project covers, so **"validates them against federal
+> URRT data" overstates it**, and "lead with the federal cross-check" points at something
+> that does not exist here.
+>
+> Two further overstatements in the framing above, found by building it:
+> - **"extracts … with an LLM"** — most of the numbers are *parsed deterministically*, not
+>   LLM-extracted: Oregon's plan rows from fixed URRT cells, Pennsylvania's from the
+>   Department's standardized Rate Template. The LLM's job is the cited justifications.
+> - **"validates"** — Pennsylvania has no independent second source at plan grain. Its
+>   check is *internal*: every plan rate must fall inside the carrier's own stated range.
+>
+> **Accurate framing for PY2027:**
+>
+> > An end-to-end pipeline that ingests ACA individual-market rate filings from two state
+> > insurance departments, parses plan-level rate changes from the regulatory templates
+> > those filings contain, extracts the cited justifications with an LLM, reconciles them
+> > against a machine-readable regulatory artifact where one exists and against
+> > carrier-stated bounds where one does not, and models them dimensionally with Type 2
+> > history and content-based change detection.
+>
+> See [ADR 0007](decisions/0007-py2026-backtest-scope.md) and
+> [ADR 0005](decisions/0005-extraction-targets-and-section-location.md).
 
 ---
 

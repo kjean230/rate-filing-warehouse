@@ -49,9 +49,16 @@ Evidence base: `docs/source-recon.md`. Cite it; don't re-derive it.
   the CMS Rate Review PUF are cross-check and conformed-dimension
   sources only, never primary.
 - Fact grain is plan grain (~570 rows), not filing grain (~21 rows).
-  Filing grain is a toy. Plan grain arrives three ways — PUF WKSH2 CSV,
-  Oregon's posted URRT XLSM, PDF extraction — and that triangulation is
-  the Phase 3 DQ story.
+  Filing grain is a toy.
+- **CORRECTED at Phase 2 — plan grain arrives THREE ways only where a PUF
+  exists, and there is no PY2027 PUF** (`docs/source-recon.md` §5 says so
+  itself; ADR 0002 already relies on it). For PY2027: **Oregon = two
+  sources** (posted URRT XLSM + PDF extraction), **Pennsylvania = one**
+  (PDF only; PA publishes no URRT), and PA is ~80% of the fact table.
+  Pennsylvania's only check is internal — every plan rate must fall inside
+  the carrier's own stated range. See
+  `docs/decisions/0007-py2026-backtest-scope.md`. Do not describe this
+  project as validating plan grain three ways for PY2027.
 - Amendments reuse the filing ID, so CDC is feasible and necessary (§3).
 
 ## Stack
@@ -92,7 +99,7 @@ session.
 | ----------------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | 0 Source recon ✅ | `docs/source-recon.md` — PA + OR, individual major medical                            | **Complete — approved 2026-08-20**                              |
 | 1 Raw ingest      | `data/raw/` populated, retrieval-metadata manifest, idempotent re-run proven by test | Re-run produces no duplicates                                   |
-| 2 Extraction      | Pydantic schema module, per-document cost/token log, failure log                       | Zero silent drops                                               |
+| 2 Extraction ✅   | Pydantic schema module, per-document cost/token log, failure log                       | **Gate passed 2026-08-20, awaiting approval** — 30/30 documents accounted for. "Zero silent drops" is an *accounting* property (nothing lost without a row saying so), not an accuracy claim. See ADRs 0005–0007. |
 | 3 DQ + quarantine | `config/dq_rules.yml`, quarantine store, one-command reprocess                       | Quarantined row names the specific rule that failed             |
 | 4 Warehouse       | dbt project,`dbt build` green, ADR per modeling choice                               | Type 2 SCD on`dim_company` demonstrably handles a name change. **No in-window rename confirmed** — see `docs/source-recon.md` §8 risk 5 for where to look; do not fabricate one. |
 | 5 CDC             | Content-hash change detection + comparison writeup vs full-document diff               | Amended filing updates, does not duplicate                      |
