@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Bumped when the field set changes. The log is append-only across phases, so a reader
@@ -64,8 +64,29 @@ def utc_stamp(moment: datetime | None = None) -> str:
     UTC also sorts lexically, which is what makes "most recent run directory" a plain
     string max rather than a date parse.
     """
-    moment = moment or datetime.now(timezone.utc)
-    return moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    moment = moment or datetime.now(UTC)
+    return moment.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def next_run_id(used: set[str], moment: datetime | None = None) -> str:
+    """A compact-UTC run stamp guaranteed not to collide with an existing run.
+
+    `utc_stamp()` has one-second granularity, and the run stamp is a directory name.
+    Two runs inside the same second would therefore share a directory and the later
+    one would overwrite the earlier version rather than preserving it — destroying
+    exactly the history the retrieved_at partition exists to carry (source-recon.md
+    §8 risk 4) and breaking the (run_id, filing_id, document_role) manifest key.
+
+    A full run cannot realistically finish inside a second at 2s per request, but the
+    invariant must not rest on that. On collision the stamp advances by one second
+    until free, which keeps the format, the lexical sort, and the ordering intact.
+    """
+    stamp_moment = (moment or datetime.now(UTC)).astimezone(UTC)
+    stamp = utc_stamp(stamp_moment)
+    while stamp in used:
+        stamp_moment += timedelta(seconds=1)
+        stamp = utc_stamp(stamp_moment)
+    return stamp
 
 
 @dataclass
@@ -163,3 +184,6 @@ class Manifest:
 
     def row_count(self) -> int:
         return sum(1 for _ in self.read_rows())
+
+    def run_ids(self) -> set[str]:
+        return {row["run_id"] for row in self.read_rows() if row.get("run_id")}

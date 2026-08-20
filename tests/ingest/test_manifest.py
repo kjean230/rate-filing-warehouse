@@ -9,6 +9,7 @@ function, and failures recorded rather than absent.
 from __future__ import annotations
 
 import json
+from datetime import UTC
 
 import pytest
 
@@ -111,12 +112,40 @@ def test_utc_stamp_is_compact_and_path_safe():
 
 
 def test_utc_stamps_sort_lexically():
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    earlier = utc_stamp(datetime(2026, 8, 20, 11, 3, 45, tzinfo=timezone.utc))
-    later = utc_stamp(datetime(2026, 9, 2, 0, 0, 1, tzinfo=timezone.utc))
+    earlier = utc_stamp(datetime(2026, 8, 20, 11, 3, 45, tzinfo=UTC))
+    later = utc_stamp(datetime(2026, 9, 2, 0, 0, 1, tzinfo=UTC))
     assert earlier < later
     assert earlier == "20260820T110345Z"
+
+
+def test_run_id_advances_rather_than_colliding():
+    """The run stamp is a directory name. Two runs in one second must not share it,
+    or the later run overwrites the earlier version instead of preserving it."""
+    from datetime import datetime
+
+    from pipeline.ingest.manifest import next_run_id
+
+    moment = datetime(2026, 8, 20, 11, 3, 45, tzinfo=UTC)
+    assert next_run_id(set(), moment) == "20260820T110345Z"
+    assert next_run_id({"20260820T110345Z"}, moment) == "20260820T110346Z"
+    assert next_run_id({"20260820T110345Z", "20260820T110346Z"}, moment) == "20260820T110347Z"
+
+
+def test_advanced_run_ids_still_sort_in_run_order():
+    from datetime import datetime
+
+    from pipeline.ingest.manifest import next_run_id
+
+    moment = datetime(2026, 8, 20, 11, 3, 45, tzinfo=UTC)
+    used: set[str] = set()
+    stamps = []
+    for _ in range(3):
+        stamp = next_run_id(used, moment)
+        used.add(stamp)
+        stamps.append(stamp)
+    assert stamps == sorted(stamps)
 
 
 def test_naive_local_time_is_converted_not_assumed():
@@ -142,7 +171,7 @@ def test_latest_index_keys_on_filing_and_role(tmp_path):
     (tmp_path / "a").write_bytes(b"x")
     manifest.append(make_row(content_hash="sha256:aaa", stored_path="a", run_id="run1"))
     manifest.append(make_row(content_hash="sha256:bbb", stored_path="a", run_id="run2"))
-    manifest.append(make_row(document_role="rate_request", content_hash="sha256:ccc", stored_path="a"))
+    manifest.append(make_row(document_role="rate_request", content_hash="sha256:ccc", stored_path="a"))  # noqa: E501
 
     index = manifest.latest_index()
     assert index[("or-2027-indv-bridgespan", "urrt")]["content_hash"] == "sha256:bbb"

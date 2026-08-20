@@ -146,7 +146,7 @@ def test_document_count_is_reported_not_asserted(policy, clock):
 
 def test_carriers_present_but_no_links_fails_loudly(policy, clock):
     """A shape change in Filing_x0020_documents must not look like a quiet success."""
-    stripped = [{**item, "Filing_x0020_documents": "<p>See our website</p>"} for item in PY2027_ITEMS]
+    stripped = [{**item, "Filing_x0020_documents": "<p>See our website</p>"} for item in PY2027_ITEMS]  # noqa: E501
     with pytest.raises(SourceCountMismatch, match="field shape may have changed"):
         make_adapter(policy, clock, items=stripped).discover()
 
@@ -164,7 +164,7 @@ def test_differently_misspelled_filenames_yield_one_filing_id(policy, clock):
 
 
 def test_year_omitted_from_filename_does_not_affect_the_key(policy, clock):
-    moda = [r for r in make_adapter(policy, clock).discover() if r.filing_id.startswith("or-2027-indv-moda")]
+    moda = [r for r in make_adapter(policy, clock).discover() if r.filing_id.startswith("or-2027-indv-moda")]  # noqa: E501
     assert moda[0].source_url.endswith("moda-rate-request-individual.pdf")
     assert moda[0].filing_id == "or-2027-indv-moda-health-plan-inc"
 
@@ -216,7 +216,7 @@ def test_non_document_links_are_ignored(policy, clock):
             + link("#top", "Top"),
         }
     ] + PY2027_ITEMS[1:]
-    refs = [r for r in make_adapter(policy, clock, items=noisy).discover() if r.source_item_key == "7"]
+    refs = [r for r in make_adapter(policy, clock, items=noisy).discover() if r.source_item_key == "7"]  # noqa: E501
     assert len(refs) == 4
 
 
@@ -281,7 +281,7 @@ def test_label_variations_still_map(policy, clock):
             ]),
         }
     ]
-    roles = [r.document_role for r in make_adapter(policy, clock, items=variants, expected=1).discover()]
+    roles = [r.document_role for r in make_adapter(policy, clock, items=variants, expected=1).discover()]  # noqa: E501
     assert roles == ["rate_request", "cost_containment", "urrt"]
 
 
@@ -360,7 +360,7 @@ def test_non_json_response_fails_with_a_useful_message(policy, clock):
     from pipeline.ingest.errors import FetchError
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="<feed xmlns='...'/>", headers={"content-type": "application/atom+xml"})
+        return httpx.Response(200, text="<feed xmlns='...'/>", headers={"content-type": "application/atom+xml"})  # noqa: E501
 
     inner = httpx.Client(transport=httpx.MockTransport(handler))
     client = PoliteClient(policy, client=inner, sleep=clock.sleep, monotonic=clock.monotonic)

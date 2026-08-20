@@ -192,7 +192,10 @@ class PoliteClient:
                 response = self._client.get(url, headers=headers)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_detail = f"{type(exc).__name__}: {exc}"
-                log.warning("attempt %s/%s for %s: %s", attempt, self.policy.max_attempts, url, last_detail)
+                log.warning(
+                    "attempt %s/%s for %s: %s",
+                    attempt, self.policy.max_attempts, url, last_detail,
+                )
                 self._backoff(attempt)
                 continue
 
@@ -205,7 +208,10 @@ class PoliteClient:
 
             if status in RETRYABLE_STATUS:
                 last_detail = f"HTTP {status}"
-                log.warning("attempt %s/%s for %s: HTTP %s", attempt, self.policy.max_attempts, url, status)
+                log.warning(
+                    "attempt %s/%s for %s: HTTP %s",
+                    attempt, self.policy.max_attempts, url, status,
+                )
                 self._backoff(attempt, response.headers.get("retry-after"))
                 continue
 
@@ -217,7 +223,9 @@ class PoliteClient:
                 # fails; the batch continues.
                 raise FetchError(url, attempt, f"HTTP {status}", status)
 
-            return FetchResult(url, status, _lower_headers(response.headers), response.content, attempt)
+            return FetchResult(
+                url, status, _lower_headers(response.headers), response.content, attempt
+            )
 
         raise FetchError(url, self.policy.max_attempts, last_detail, last_status)
 

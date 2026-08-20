@@ -18,7 +18,7 @@ from pipeline.ingest.http import PoliteClient
 from pipeline.ingest.roles import FILING_PACKET
 
 INDEX_URL = "https://www.pa.gov/agencies/insurance/aca-health-rate-filings"
-DAM = "/content/dam/copapwp-pagov/en/insurance/documents/posted-filings-reports-orders/aca-health-rate-filings/plan-year-2027"
+DAM = "/content/dam/copapwp-pagov/en/insurance/documents/posted-filings-reports-orders/aca-health-rate-filings/plan-year-2027"  # noqa: E501
 INDV_PREFIX = f"{DAM}/individual-market/"
 SMGRP_PREFIX = f"{DAM}/small-group-market/"
 
@@ -60,7 +60,7 @@ def make_adapter(policy, clock, html: str, expected: int = 15) -> PennsylvaniaAd
         options={
             "index_url": INDEX_URL,
             "document_path_prefix": INDV_PREFIX,
-            "carrier_slug_strip_pattern": "-rate-change-summary-(indv-mkt|indv|individual-market|individual).*$",
+            "carrier_slug_strip_pattern": "-rate-change-summary-(indv-mkt|indv|individual-market|individual).*$",  # noqa: E501
             "expected_document_count": expected,
             "document_role": FILING_PACKET,
         },
@@ -114,7 +114,7 @@ def test_small_group_only_index_resolves_zero_not_sixteen(policy, clock):
 def test_unrelated_pdfs_on_the_page_are_ignored(policy, clock):
     html = build_index_html().replace(
         "</ul>",
-        '<li><a href="/content/dam/copapwp-pagov/en/insurance/newsroom/press-release.pdf">PR</a></li></ul>',
+        '<li><a href="/content/dam/copapwp-pagov/en/insurance/newsroom/press-release.pdf">PR</a></li></ul>',  # noqa: E501
     )
     refs = make_adapter(policy, clock, html).discover()
     assert len(refs) == 15

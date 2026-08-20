@@ -191,7 +191,8 @@ def _unwrap_odata(payload: Any) -> list[dict[str, Any]] | None:
     if isinstance(payload, dict):
         if isinstance(payload.get("value"), list):
             return payload["value"]
-        results = payload.get("d", {}).get("results") if isinstance(payload.get("d"), dict) else None
+        wrapper = payload.get("d")
+        results = wrapper.get("results") if isinstance(wrapper, dict) else None
         if isinstance(results, list):
             return results
     return None
