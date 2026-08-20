@@ -99,9 +99,8 @@ def ingest_state(
     for ref in refs:
         result.roles[ref.document_role] = result.roles.get(ref.document_role, 0) + 1
 
-    # Counts are logged BEFORE any document is fetched, so a surprise is visible
-    # before bytes move.
-    log.info("%s", adapter.describe(refs))
+    # discover() already logged the counts before any document was fetched, so a
+    # surprise is visible before bytes move.
     if dry_run:
         return result
 
@@ -310,7 +309,9 @@ def format_summary(result: RunResult, store: RawStore, manifest: Manifest, dry_r
             lines.append(
                 f"      stored={state.stored}  unchanged={state.unchanged} "
                 f"(304={state.not_modified})  failed={state.failed}  "
-                f"bytes={state.bytes_stored:,}"
+                # bytes_stored, not bytes transferred: --force-fetch downloads
+                # everything and may still store nothing.
+                f"bytes_stored={state.bytes_stored:,}"
             )
         for failure in state.failures:
             lines.append(f"      FAILED {failure}")
