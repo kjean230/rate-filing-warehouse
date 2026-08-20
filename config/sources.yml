@@ -1,0 +1,62 @@
+# Per-state access config. Nothing source-specific belongs in code.
+#
+# Scope fence (CLAUDE.md): Pennsylvania + Oregon, ACA individual-market major
+# medical, plan year 2027. Adding a third state or the small-group market is a
+# scope decision requiring approval, not a config edit.
+#
+# Evidence for every URL and count below: docs/source-recon.md §2.
+
+defaults:
+  plan_year: 2027
+  market: individual
+
+  # Network policy. See docs/decisions/0004-ingest-failure-policy.md.
+  min_request_interval_seconds: 2.0   # per-host floor, sequential requests only
+  max_attempts: 3                     # applies to 5xx / 429 / timeouts ONLY, never 403
+  backoff_base_seconds: 2.0           # 2s, 4s, 8s
+  timeout_seconds: 60.0               # PA packets run to 3.4 MB, OR rate requests to 4.9 MB
+  respect_robots: true                # re-checked every run; see source-recon.md §8 risk 7
+
+  # {contact} is substituted from INGEST_CONTACT in the environment.
+  # Never a browser User-Agent. See CLAUDE.md "Honest User-Agent, always".
+  user_agent_template: "rate-filing-pipeline/0.1 (portfolio data engineering project; +{contact})"
+
+sources:
+  PA:
+    adapter: pennsylvania
+    # Static Adobe AEM DAM paths. URL *construction* from a parsed index.
+    index_url: "https://www.pa.gov/agencies/insurance/posted-filings-reports-company-orders/product-and-rate-filings/aca-health-rate-filings"
+    # The index carries 31 PY2027 documents: 15 individual, 16 small group.
+    # This prefix is the market filter. Small group is out of scope (CLAUDE.md).
+    document_path_prefix: "/content/dam/copapwp-pagov/en/insurance/documents/posted-filings-reports-orders/aca-health-rate-filings/plan-year-2027/individual-market/"
+    # Carrier slug = filename stem with this suffix removed.
+    carrier_slug_strip_pattern: "-rate-change-summary-(indv-mkt|indv|individual-market|individual).*$"
+    # Hard assert. 12 resolved documents means the source changed or the path
+    # pattern is wrong — either way, do not silently ingest a partial set.
+    expected_document_count: 15
+    # One 122-page packet per filing, cover letter through rate exhibits.
+    document_role: filing_packet
+
+  OR:
+    adapter: oregon
+    # Open SharePoint REST/OData. URL *resolution* on every run — Oregon's
+    # document URLs are editorially curated and demonstrably unstable
+    # (source-recon.md §8 risk 3). Never persist one as a key.
+    api_base: "https://dfr.oregon.gov/healthrates/_api/web"
+    url_base: "https://dfr.oregon.gov"
+    list_title: "Individual Filings"
+    # Hard assert on carriers, not documents: each carrier posts 3-4 documents,
+    # so the document count is a multiple that cannot be asserted flat.
+    expected_carrier_count: 4
+    # Link text -> document_role. Matched case-insensitively on a normalized
+    # label. An unmatched label maps to "other" and is still ingested; it is
+    # never dropped.
+    role_map:
+      "rate request": rate_request
+      "rate requests": rate_request
+      "cost containment": cost_containment
+      "rate tables and factors": rate_tables
+      "rate tables": rate_tables
+      "cost metrics": cost_metrics
+      "urrt": urrt
+      "unified rate review template": urrt
