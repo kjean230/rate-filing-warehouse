@@ -1,0 +1,40 @@
+version: 2
+
+seeds:
+  - name: federal_py2027_submissions
+    description: >
+      PY2027 individual-market submissions for PA and OR from the federal Rate Review API
+      (ratereview.healthcare.gov/ratereviewservices/urr/submissions?state={ST}&year=2027),
+      fetched ONCE on 2026-08-20 with the project's honest User-Agent and frozen here.
+      This seed is the drift guard of ADR 0015: the dbt DAG never calls the federal API
+      (undocumented, observed 503 — source-recon.md §8 risk 2), and every fact in the
+      warehouse remains state-sourced (§8 risk 1, ADR 0001 §4). Cross-check and
+      conformed-dimension context ONLY — the prelim/final averages are filing-grain and
+      federal, and never become measures (ADR 0007). Small-group rows were deliberately
+      not committed: a second line of business does not enter the repo (CLAUDE.md fence).
+      Refreshing this file is a deliberate re-fetch and a diffable commit, not a build
+      side effect.
+    config:
+      column_types:
+        state: text
+        # HIOS issuer id, from the API's issuerCode (verified equal on every row).
+        # Text, not int: it is a key, and keys are never arithmetic.
+        hios_issuer_id: text
+        # Opaque natural key scoped by plan year — never parsed, never assumed a
+        # width (source-recon.md §3: it was 6 digits in 2019 and 9 in PY2027).
+        submission_identifier: text
+        issuer_name_federal: text
+        avg_rate_prelim_pct: numeric
+        avg_rate_final_pct: numeric
+        review_status_code: text
+        # Kept text verbatim (MM/DD/YYYY as the API emits it); parse at use, not at rest.
+        current_status_date: text
+        retrieved_at: date
+    columns:
+      - name: hios_issuer_id
+        tests:
+          - not_null
+      - name: submission_identifier
+        tests:
+          - not_null
+          - unique

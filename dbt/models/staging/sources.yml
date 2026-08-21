@@ -1,0 +1,56 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Landed JSONL logs from pipeline phases 1-3. Every table here has the
+      identical physical shape — payload jsonb, source_file text,
+      source_line int, loaded_at timestamptz, load_id text — because the loader
+      lands each JSONL line verbatim as one payload; all typing happens in
+      staging. Disk is the system of record (ADR 0003); these tables are a
+      queryable copy, never the authority.
+    schema: raw
+    tables:
+      - name: ingest_manifest
+        description: >
+          Phase 1 retrieval-metadata manifest (ADR 0003). One row per
+          (run_id, filing_id, document_role) — including 304s and failures.
+          Schema v2 (ADR 0011) adds avg_rate_request_posted; v1 rows lack the
+          key entirely.
+      - name: filing_extracts
+        description: >
+          Phase 2 FilingExtract rows — filing grain, identifiers plus headline
+          measures (ADR 0005/0006). Oregon emits two rows per filing, one per
+          producing document.
+      - name: plan_extracts
+        description: >
+          Phase 2 PlanRateExtract rows — plan grain, THE fact grain
+          (ADR 0001 §3).
+      - name: justification_extracts
+        description: >
+          Phase 2 RateJustification rows — narrative grain, the LLM-extracted
+          "what justifications did carriers cite" half of the project question
+          (ADR 0005).
+      - name: extraction_outcomes
+        description: >
+          Phase 2 outcome ledger — one terminal verdict per document per run,
+          the mechanical form of the zero-silent-drops gate (ADRs 0005-0007).
+      - name: field_misses
+        description: >
+          Phase 2 field-level miss log. Deliberately a source WITHOUT a staging
+          model — its findings are modeled via stg_quarantine's
+          origin='adopted' rows (ADR 0009 §4), and modeling both would
+          double-count the same findings. Registered here so the raw table is
+          documented and lineage-visible.
+      - name: llm_calls
+        description: >
+          Phase 2 per-call cost/token log (a named Phase 2 deliverable) —
+          prices stamped at call time, cache accounting first-class.
+      - name: quarantine
+        description: >
+          Phase 3 quarantine store — one row per violation, every row names
+          the rule that failed (ADRs 0008/0009). A marking, not a move.
+      - name: dq_results
+        description: >
+          Phase 3 rule-level summary — one row per (run, rule), so "never
+          checked" and "checked, clean" cannot collapse (ADR 0009).

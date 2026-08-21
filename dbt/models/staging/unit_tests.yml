@@ -1,0 +1,37 @@
+version: 2
+
+unit_tests:
+  - name: manifest_v1_lacks_the_column_v2_may_carry_null
+    description: >
+      ADR 0011's boundary, on synthetic payloads: a v1 row LACKS avg_rate_request_posted
+      (has_posted_avg_rate false), a v2 row may carry it as a value OR as an explicit
+      null — and "v2, source posted nothing" must stay distinguishable from "v1, column
+      did not exist yet". The fraction parses only where a value exists.
+    model: stg_ingest_manifest
+    given:
+      - input: source('raw', 'ingest_manifest')
+        format: sql
+        rows: |
+          select '{"manifest_schema_version": 1, "run_id": "R1", "retrieved_at": "T1",
+                   "state": "OR", "filing_id": "or-2027-indv-x", "document_role": "urrt",
+                   "carrier_label_raw": "X", "plan_year": 2027, "market": "individual"}'::jsonb
+                 as payload,
+                 'raw/_manifest/ingest_manifest.jsonl' as source_file, 1 as source_line,
+                 now() as loaded_at, 'L1' as load_id
+          union all
+          select '{"manifest_schema_version": 2, "run_id": "R2", "retrieved_at": "T2",
+                   "state": "OR", "filing_id": "or-2027-indv-x", "document_role": "urrt",
+                   "carrier_label_raw": "X", "plan_year": 2027, "market": "individual",
+                   "avg_rate_request_posted": "11.7%"}'::jsonb,
+                 'raw/_manifest/ingest_manifest.jsonl', 2, now(), 'L1'
+          union all
+          select '{"manifest_schema_version": 2, "run_id": "R3", "retrieved_at": "T3",
+                   "state": "PA", "filing_id": "pa-2027-indv-y", "document_role": "filing_packet",
+                   "carrier_label_raw": "Y", "plan_year": 2027, "market": "individual",
+                   "avg_rate_request_posted": null}'::jsonb,
+                 'raw/_manifest/ingest_manifest.jsonl', 3, now(), 'L1'
+    expect:
+      rows:
+        - {run_id: R1, manifest_schema_version: 1, has_posted_avg_rate: false, avg_rate_request_posted: null, avg_rate_request_posted_fraction: null}
+        - {run_id: R2, manifest_schema_version: 2, has_posted_avg_rate: true, avg_rate_request_posted: '11.7%', avg_rate_request_posted_fraction: 0.117}
+        - {run_id: R3, manifest_schema_version: 2, has_posted_avg_rate: true, avg_rate_request_posted: null, avg_rate_request_posted_fraction: null}

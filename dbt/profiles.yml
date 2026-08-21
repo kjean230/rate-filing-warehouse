@@ -1,0 +1,17 @@
+# Committed deliberately — no secrets here, local-dev defaults only. Every value
+# is an env_var() indirection whose default matches the docker-compose Postgres
+# container, so a clean clone runs `docker compose up` + `dbt build` with no
+# profile setup. A real deployment overrides via environment. The ADR names this.
+
+rate_filing:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'localhost') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | as_number }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'rate_filing') }}"
+      user: "{{ env_var('POSTGRES_USER', 'rate_filing') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD', 'rate_filing_local') }}"
+      schema: analytics
+      threads: 4

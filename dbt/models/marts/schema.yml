@@ -1,0 +1,189 @@
+version: 2
+
+models:
+  - name: fct_plan_rate
+    description: >
+      THE fact table — grain: one plan per filing, current extract run (649 rows; the
+      native grain of URRT Worksheet 2). A row is a claim about what the filing says
+      and how far it was checked, never that the rate is correct: the vetted measure
+      (rate_change_requested) is NULL for anything error-quarantined, the as-parsed
+      column preserves what extraction read, and rate_change_status names which claim
+      each row supports. Only 20 of 583 PA rows validate against the carrier's own
+      statement (gqo alone); the status column is where that fact lives in SQL.
+      Statuses ATTRIBUTE Phase 3 verdicts — nothing here re-evaluates a rule
+      (ADR 0013 / ADR 0008 §4).
+    columns:
+      - name: plan_rate_key
+        tests: [unique, not_null]
+      - name: company_key
+        description: Point-in-time SCD2 join on the extract run's stamp.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_company')
+              field: company_key
+      - name: filing_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_filing')
+              field: filing_key
+      - name: plan_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_plan')
+              field: plan_key
+      - name: rate_change_status
+        tests:
+          - not_null
+          - accepted_values:
+              values:
+                - quarantined
+                - cell_error
+                - missing
+                - structural_zero
+                - carrier_range_validated
+                - single_source_deterministic
+                - unvalidated_parse
+      - name: market
+        description: Individual only — a second value here is LOB scope drift.
+        tests:
+          - accepted_values:
+              values: ['individual']
+
+  - name: dim_company
+    description: >
+      Type 2 issuer dimension (natural key hios_issuer_id — the only identifier on
+      every extracted row). carrier_label_raw is the versioned attribute; legal name /
+      NAIC are a current-valued overlay. One version per issuer on the real corpus —
+      no in-window rename exists (searched and recorded, ADR 0014); the versioning
+      machinery is demonstrated by unit test on a labeled fixture.
+    columns:
+      - name: company_key
+        tests: [unique, not_null]
+      - name: hios_issuer_id
+        tests: [not_null]
+      - name: carrier_label_raw
+        tests: [not_null]
+
+  - name: dim_filing
+    description: >
+      One row per filing (19; Oregon's two-row duality collapsed upstream with
+      documented precedence). Carries the conformed identifiers (ADR 0015) and the
+      carrier's statements about the filing — stated average, stated min/max range,
+      Oregon's posted list value — as context attributes at filing grain.
+    columns:
+      - name: filing_key
+        tests: [unique, not_null]
+      - name: filing_id
+        tests: [unique, not_null]
+      - name: market
+        tests:
+          - accepted_values:
+              values: ['individual']
+
+  - name: dim_plan
+    description: >
+      One row per plan as listed in its filing, AS FILED and marked where disputed —
+      never corrected: Moda 39424OR1660004 stays metal=Gold with metal_disputed=true
+      (the filed workbook is wrong at Wksh 2!H15; correcting it would fabricate data
+      the source does not state).
+    columns:
+      - name: plan_key
+        tests: [unique, not_null]
+      - name: plan_id_hios
+        description: >
+          NOT unique across the corpus — the first build proved the assumption false
+          (ADR 0013): 16322PA0040008 appears in upmchn's genuine Table 10 AND as an
+          Exhibit-7 experience-SCID bleed in upmchp, and genuine Table 10 rows carry
+          non-filer SCID prefixes during the UPMC entity transition. The grain is
+          (filing_id, plan_id_hios), tested below.
+        tests: [not_null]
+      - name: metal
+        tests:
+          - accepted_values:
+              values: [Bronze, Silver, Gold, Platinum, Catastrophic]
+      - name: plan_category
+        tests:
+          - accepted_values:
+              values: [New, Renewing, Terminated]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [filing_id, plan_id_hios]
+
+  - name: dim_justification
+    description: >
+      The justifications half of the project question: a multivalued dimension on
+      dim_filing, one row per cited driver (302). quantified_impact_pct is a
+      NON-ADDITIVE attribute of carrier speech — stated decompositions overlap and
+      compound, so summing across drivers is invalid, which is exactly why this is not
+      a fact table (ADR 0016).
+    columns:
+      - name: justification_key
+        tests: [unique, not_null]
+      - name: driver_category
+        tests:
+          - not_null
+          - accepted_values:
+              values:
+                - medical_trend
+                - rx_trend
+                - morbidity
+                - demographic_shift
+                - plan_design_change
+                - provider_contracting
+                - risk_adjustment
+                - reinsurance
+                - admin_expense
+                - taxes_fees
+                - profit_risk_load
+                - subsidy_policy_change
+                - cost_containment
+                - other
+      - name: evidence_quote
+        description: >
+          Mandatory grounding (ADR 0006 §4): a stated numeric impact appeared verbatim
+          in this quote at construction, or the row could not exist.
+        tests: [not_null]
+
+unit_tests:
+  - name: fct_status_derivation_covers_every_branch
+    description: >
+      One mock plan per rate_change_status value, asserting both the status and the
+      vetted-measure rule: NULL for quarantined/cell_error/missing, populated
+      otherwise (structural zeros keep their true 0 — exclusion is the analyst's
+      WHERE, made visible by the status).
+    model: fct_plan_rate
+    given:
+      - input: ref('int_plans_current')
+        rows:
+          - {filing_id: pa-f1, plan_id_hios: '11111PA0010001', state: PA, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0.05, cumulative_rate_change_pct_is_cell_error: false, plan_category: null}
+          - {filing_id: pa-f1, plan_id_hios: '11111PA0010002', state: PA, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: null, cumulative_rate_change_pct_is_cell_error: true, plan_category: null}
+          - {filing_id: pa-f1, plan_id_hios: '11111PA0010003', state: PA, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: null, cumulative_rate_change_pct_is_cell_error: false, plan_category: null}
+          - {filing_id: pa-f1, plan_id_hios: '11111PA0010004', state: PA, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0.12, cumulative_rate_change_pct_is_cell_error: false, plan_category: Renewing}
+          - {filing_id: or-f2, plan_id_hios: '22222OR0020001', state: OR, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0, cumulative_rate_change_pct_is_cell_error: false, plan_category: New}
+          - {filing_id: or-f2, plan_id_hios: '22222OR0020002', state: OR, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0.14, cumulative_rate_change_pct_is_cell_error: false, plan_category: Renewing}
+          - {filing_id: pa-f3, plan_id_hios: '33333PA0030001', state: PA, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0.08, cumulative_rate_change_pct_is_cell_error: false, plan_category: null}
+      - input: ref('int_filing_conformed')
+        rows:
+          - {filing_id: pa-f1, state: PA, market: individual, hios_issuer_id: '11111', rate_change_min: 0.10, rate_change_max: 0.15}
+          - {filing_id: or-f2, state: OR, market: individual, hios_issuer_id: '22222', rate_change_min: null, rate_change_max: null}
+          - {filing_id: pa-f3, state: PA, market: individual, hios_issuer_id: '33333', rate_change_min: null, rate_change_max: null}
+      - input: ref('int_quarantine_current')
+        rows:
+          - {filing_id: pa-f1, subject_key: '11111PA0010001', field_name: cumulative_rate_change_pct, rule_id: PA_PLAN_RATE_IN_STATED_RANGE, severity: error, grain: plan, reprocess_status: open}
+      - input: ref('dim_company')
+        rows:
+          - {hios_issuer_id: '11111', company_key: ck1, valid_from: '00000000T000000Z', valid_to: null}
+          - {hios_issuer_id: '22222', company_key: ck2, valid_from: '00000000T000000Z', valid_to: null}
+          - {hios_issuer_id: '33333', company_key: ck3, valid_from: '00000000T000000Z', valid_to: null}
+    expect:
+      rows:
+        - {plan_id_hios: '11111PA0010001', rate_change_status: quarantined, rate_change_requested: null, rate_change_requested_as_parsed: 0.05}
+        - {plan_id_hios: '11111PA0010002', rate_change_status: cell_error, rate_change_requested: null, rate_change_requested_as_parsed: null}
+        - {plan_id_hios: '11111PA0010003', rate_change_status: missing, rate_change_requested: null, rate_change_requested_as_parsed: null}
+        - {plan_id_hios: '11111PA0010004', rate_change_status: carrier_range_validated, rate_change_requested: 0.12, rate_change_requested_as_parsed: 0.12}
+        - {plan_id_hios: '22222OR0020001', rate_change_status: structural_zero, rate_change_requested: 0, rate_change_requested_as_parsed: 0}
+        - {plan_id_hios: '22222OR0020002', rate_change_status: single_source_deterministic, rate_change_requested: 0.14, rate_change_requested_as_parsed: 0.14}
+        - {plan_id_hios: '33333PA0030001', rate_change_status: unvalidated_parse, rate_change_requested: 0.08, rate_change_requested_as_parsed: 0.08}

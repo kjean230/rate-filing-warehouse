@@ -1,0 +1,37 @@
+# dbt project for the rate filing warehouse (Phase 4).
+#
+# Layering: staging (views, 1:1 with raw JSONL sources, typing + renames only)
+# -> intermediate (views, run selection / joins / reshaping) -> marts (tables,
+# the fact + conforming dimensions). Staging and intermediate stay views so a
+# `dbt build` always reflects the raw tables; marts are tables because they are
+# the query surface.
+
+name: rate_filing
+version: "1.0.0"
+profile: rate_filing
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+
+target-path: target
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  rate_filing:
+    staging:
+      +materialized: view
+      +schema: staging
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+    marts:
+      +materialized: table
+      +schema: marts
+
+seeds:
+  rate_filing:
+    +schema: seeds
