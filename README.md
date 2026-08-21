@@ -1,6 +1,6 @@
 # rate-filing-warehouse
 
-Dimensional warehouse for ACA individual-market rate filings from two state DOIs (PA, OR), plan year 2027 — deterministic parsing of regulatory templates plus LLM extraction of the cited justifications, both to a validated schema, with a dbt star schema, Type 2 SCD, and normalized-field CDC for amended filings.
+Dimensional warehouse for ACA individual-market rate filings from two state DOIs (PA, OR), plan year 2027 — deterministic parsing of regulatory templates plus LLM extraction of the cited justifications, both to a validated schema, with a dbt star schema and Type 2 SCD; normalized-field CDC for amended filings is planned (Phase 5).
 
 ## What this is, accurately
 
