@@ -19,10 +19,12 @@ rather than a date parse — the same property ADR 0003 gave the ingest store's
 directory segments. But "most recent directory" is not "current extraction": a
 `--dry-run` extract writes a run directory too, with no LLM-read field in it
 (Phase 5, ADR 0017 — the trap the warehouse's `int_extract_run_current` closes by
-skipping dry runs). So the run validated here is the filing's latest LIVE run per
-the extraction ledger — the same authority the warehouse follows (ADR 0006 / 0013)
-— and only where the ledger names no run with a directory does the newest directory
-stand in (fixture stores without a ledger; a run whose every document failed).
+preferring live runs). So the run validated here is the filing's latest LIVE run per
+the extraction ledger — the same authority the warehouse follows (ADR 0006 / 0013);
+a dry run stands in only when nothing live exists (a clean clone without an API
+key), and only where the ledger names no run with a directory does the newest
+non-dry directory stand in (fixture stores without a ledger; a run whose every
+document failed).
 
 **3. A field's value and its provenance travel together.** `subject.provenance_for()`
 is what lets a quarantine row name the workbook cell or PDF page behind a bad
@@ -230,36 +232,51 @@ def percent_to_fraction(value: Any) -> Decimal | None:
 # ---------------------------------------------------------------------------
 
 
-def latest_run_dir(filing_dir: Path) -> Path | None:
+def latest_run_dir(filing_dir: Path, exclude: frozenset[str] = frozenset()) -> Path | None:
     """Newest run directory, chosen lexically — the FALLBACK, not the rule.
 
     Compact-UTC run ids sort lexically in chronological order, which is the
     property ADR 0003 gave them so that "most recent" needs no date parsing.
+    `exclude` names run ids (dry runs, per the ledger) that may not stand in for a
+    live run; if nothing else exists they are used anyway — best available.
     """
     runs = sorted(p for p in filing_dir.iterdir() if p.is_dir())
-    return runs[-1] if runs else None
+    preferred = [p for p in runs if p.name not in exclude]
+    chosen = preferred or runs
+    return chosen[-1] if chosen else None
 
 
-def current_live_runs(extract_root: Path) -> dict[str, str]:
-    """filing_id -> the filing's latest LIVE extract run, per the ledger.
+def current_runs(extract_root: Path) -> tuple[dict[str, str], frozenset[str]]:
+    """`(filing_id -> the run validation should read, the ledger's dry-run ids)`.
 
-    The mirror of `int_extract_run_current`: max run_id over the ledger's latest
-    non-dry-run outcome rows, per filing. Empty when no ledger exists (fixture
-    stores), in which case `load_bundles` falls back to the newest directory.
+    The mirror of `int_extract_run_current`: the filing's latest LIVE run, or —
+    only when nothing live exists (a clean clone without an API key) — its latest
+    dry run. A dry run never outranks a live one, however new. Empty when no
+    ledger exists (fixture stores), in which case `load_bundles` falls back to the
+    newest directory.
     """
-    current: dict[str, str] = {}
-    for (filing_id, _role), row in ExtractionLedger(extract_root).latest_index().items():
-        run_id = str(row.get("run_id") or "")
-        if run_id > current.get(filing_id, ""):
-            current[filing_id] = run_id
-    return current
+    ledger = ExtractionLedger(extract_root)
+    preferred: dict[str, tuple[bool, str]] = {}
+    for (filing_id, _role), row in ledger.latest_index().items():
+        candidate = (not row.get("dry_run"), str(row.get("run_id") or ""))
+        if candidate > preferred.get(filing_id, (False, "")):
+            preferred[filing_id] = candidate
+    dry = frozenset(
+        str(row["run_id"])
+        for row in ledger.read_outcomes()
+        if row.get("dry_run") and row.get("run_id")
+    )
+    return {filing_id: run_id for filing_id, (_, run_id) in preferred.items()}, dry
 
 
-def select_run_dir(filing_dir: Path, ledger_run_id: str | None) -> Path | None:
-    """The ledger's run if it has a directory here; otherwise the newest directory."""
+def select_run_dir(
+    filing_dir: Path, ledger_run_id: str | None, exclude: frozenset[str] = frozenset()
+) -> Path | None:
+    """The ledger's run if it has a directory here; otherwise the newest directory
+    that is not a dry run (a live run whose every document failed wrote nothing)."""
     if ledger_run_id and (filing_dir / ledger_run_id).is_dir():
         return filing_dir / ledger_run_id
-    return latest_run_dir(filing_dir)
+    return latest_run_dir(filing_dir, exclude)
 
 
 def load_bundles(
@@ -279,7 +296,7 @@ def load_bundles(
     for row in manifest_rows or []:
         by_filing.setdefault(row["filing_id"], []).append(row)
 
-    live_runs = current_live_runs(root)
+    preferred_runs, dry_runs = current_runs(root)
 
     bundles: list[FilingBundle] = []
     for state_dir in sorted(p for p in root.iterdir() if p.is_dir()):
@@ -288,7 +305,7 @@ def load_bundles(
         for filing_dir in sorted(p for p in state_dir.iterdir() if p.is_dir()):
             if only_filing and filing_dir.name != only_filing:
                 continue
-            run_dir = select_run_dir(filing_dir, live_runs.get(filing_dir.name))
+            run_dir = select_run_dir(filing_dir, preferred_runs.get(filing_dir.name), dry_runs)
             if run_dir is None:
                 continue
             bundles.append(
@@ -388,7 +405,7 @@ __all__ = [
     "FilingBundle",
     "Subject",
     "SubjectLoadError",
-    "current_live_runs",
+    "current_runs",
     "is_cell_error",
     "latest_run_dir",
     "load_bundles",

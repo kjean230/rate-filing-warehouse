@@ -52,7 +52,7 @@ select
     (payload ->> 'normalized_field_count')::int as normalized_field_count,
     (payload ? 'normalized_field_hash') as has_normalized_hash,
 
-    -- ledger v2: a dry run is never a filing's current extraction
+    -- ledger v2: a dry run never outranks a live extraction (int_extract_run_current)
     (payload ->> 'dry_run')::boolean as dry_run,
     (payload ? 'dry_run') as has_dry_run_flag,
 

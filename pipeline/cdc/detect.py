@@ -21,9 +21,10 @@ ADR 0002 put on every row).
 
 **Per document, the cross-layer verdict that drives action — `currency`:**
 
-    current          the document's latest non-dry-run extraction is of its current bytes
+    current          the document's latest extraction — live preferred; a dry run only
+                     when nothing live exists — is of its current bytes
     stale            it is of OLDER bytes: re-extract the FILING
-    never_extracted  the ledger has no live outcome row for this key at all — the
+    never_extracted  the ledger has no outcome row for this key at all — the
                      document SET changed (or nothing has ever been extracted); a
                      per-filing re-extract would only write `skipped: no handler`
                      for a new role, so this needs a full extract and, if the role
@@ -189,7 +190,7 @@ def detect_from_rows(
 
     `manifest_rows` is the whole append-only manifest in file order (chronological
     by construction); `latest_outcomes` is `ExtractionLedger.latest_index()` —
-    dry runs already excluded — keyed by (filing_id, document_role).
+    live rows preferred over dry ones — keyed by (filing_id, document_role).
     """
     history: dict[tuple[str, str], list[dict]] = {}
     for row in manifest_rows:

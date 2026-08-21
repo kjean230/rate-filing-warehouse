@@ -66,7 +66,7 @@ manifest row and no new directory; changed bytes get both.
 ### Tests
 
 ```bash
-pytest              # 495 offline tests, including every phase gate
+pytest              # 499 offline tests, including every phase gate
 pytest -m warehouse # 6 against the local Postgres container (POSTGRES_PORT if not 5432)
 pytest -m live      # 4 opt-in probes against the real sources (discovery only)
 ruff check .        # the only thing enforcing the declared Python 3.11 floor

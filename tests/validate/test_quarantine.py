@@ -347,11 +347,41 @@ def test_the_ledger_picks_the_run_and_a_dry_run_is_never_validated(config, store
     assert bundles[0].plans[0].get("metal") == "Gold"
 
 
-def test_a_ledger_run_without_a_directory_falls_back_to_the_newest_directory(
+def test_a_ledger_run_without_a_directory_falls_back_to_the_newest_live_directory(
     config, store, extract_root
 ):
     """A live run whose every document failed writes no outputs: validate the newest
-    directory that exists rather than nothing, and say so in the docstring."""
+    directory that is not a dry run — even when a dry run's directory is newer."""
+    from pipeline.extract.outcome import ExtractionLedger, ExtractionOutcome
+
+    write_extract(
+        extract_root, "or-2027-indv-test",
+        plans=[plan_row("39424OR1660004", metal="Gold", av_metal_value="0.625")],
+        run_id=EXTRACT_RUN,
+    )
+    write_extract(
+        extract_root, "or-2027-indv-test",
+        plans=[plan_row("39424OR1660004", metal="Bronze", av_metal_value="0.625")],
+        run_id="20260821T080000Z",  # a dry run, newer than the live directory
+    )
+    ledger = ExtractionLedger(extract_root)
+    ledger.record(ExtractionOutcome(
+        run_id="20260821T080000Z", filing_id="or-2027-indv-test", state="OR",
+        document_role="urrt", status="extracted", dry_run=True, normalized_hash_version=1,
+    ))
+    ledger.record(ExtractionOutcome(
+        run_id="20260821T090000Z", filing_id="or-2027-indv-test", state="OR",
+        document_role="urrt", status="failed", reason="boom", error_class="builtins.ValueError",
+        normalized_hash_version=1,
+    ))
+    bundle = load_bundles(extract_root)[0]
+    assert bundle.extract_run_id == EXTRACT_RUN
+    assert bundle.plans[0].get("metal") == "Gold"
+
+
+def test_a_filing_with_only_dry_runs_is_validated_from_the_dry_run(config, store, extract_root):
+    """A clean clone without an API key: the dry run is the only extraction there is,
+    so it is the current one — the same preference the warehouse applies."""
     from pipeline.extract.outcome import ExtractionLedger, ExtractionOutcome
 
     write_extract(
@@ -360,8 +390,7 @@ def test_a_ledger_run_without_a_directory_falls_back_to_the_newest_directory(
         run_id=EXTRACT_RUN,
     )
     ExtractionLedger(extract_root).record(ExtractionOutcome(
-        run_id="20260821T090000Z", filing_id="or-2027-indv-test", state="OR",
-        document_role="urrt", status="failed", reason="boom", error_class="builtins.ValueError",
-        normalized_hash_version=1,
+        run_id=EXTRACT_RUN, filing_id="or-2027-indv-test", state="OR", document_role="urrt",
+        status="extracted", dry_run=True, normalized_hash_version=1,
     ))
     assert load_bundles(extract_root)[0].extract_run_id == EXTRACT_RUN

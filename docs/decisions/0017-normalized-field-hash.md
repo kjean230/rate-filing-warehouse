@@ -102,11 +102,18 @@ like bumping `MANIFEST_SCHEMA_VERSION`.
 ## Decision 5 — `dry_run` in the same bump, and the v1 read rule
 
 `ExtractionOutcome.dry_run` is set from the client (`ExtractionClient.dry_run` — the one
-object that decides whether the API is called; no second definition). `int_extract_run_current`
-and `ExtractionLedger.latest_index()` skip dry-run rows: a dry run writes real outcome rows
-(that is what lets the Phase 2 gate be exercised without a key) but carries no LLM-read
-field, so letting it become "current" would silently empty every LLM-sourced column in the
-warehouse — which the two real dry runs could have done to the real warehouse at any time.
+object that decides whether the API is called; no second definition). `int_extract_run_current`,
+`ExtractionLedger.latest_index()` and validation's run selection all apply one rule: **a
+live run outranks any dry run, however new.** A dry run writes real outcome rows (that is
+what lets the Phase 2 gate be exercised without a key) but carries no LLM-read field, so
+letting it *replace* a live extraction would silently empty every LLM-sourced column in
+the warehouse — which the two real dry runs could have done at any time. Where nothing
+live exists (a clean clone without an API key) the dry run *is* the current extraction —
+the deterministic 649 plan rows it read are real — and the row says so (`dry_run = true`).
+*Rejected:* excluding dry runs outright — consistent, and it would have made a clean clone
+without a key validate nothing and build an empty warehouse, breaking the one-command
+story for data the dry run genuinely extracts; the trap T6 names is *replacement*, not
+existence.
 
 The same trap had a sibling on the validation side, found when the first dry run after the
 ledger-v2 live run was planned: `pipeline/validate/subjects.load_bundles` chose the filing's
@@ -126,8 +133,9 @@ jsonb key existence. The read rules are stated, not coalesced:
 - an absent `dry_run` is read as **live** — true of every v1 run that is current on the
   real corpus when the rule was written, and held on every build by
   `assert_current_extract_run_is_live` (a current run whose cost-log rows are all
-  `stop_reason = dry_run` fails the build; a dry run of a filing with no LLM sections logs
-  no calls and is not caught — stated limitation; v2 rows carry the flag regardless).
+  `stop_reason = dry_run` while another run logged a live call for the same filing fails
+  the build — a dry run outranked a live one; a dry run of a filing with no LLM sections
+  logs no calls and is not caught — stated limitation; v2 rows carry the flag regardless).
 
 ## Alternatives rejected (design)
 

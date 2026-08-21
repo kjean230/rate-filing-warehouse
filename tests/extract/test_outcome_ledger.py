@@ -292,7 +292,7 @@ def test_a_v1_row_is_read_as_lacking_the_v2_keys(ledger):
     assert ledger.latest_index()[KEY_A]["run_id"] == RUN
 
 
-def test_latest_index_picks_the_greatest_run_and_skips_dry_runs(ledger):
+def test_latest_index_prefers_live_over_a_newer_dry_run(ledger):
     live_old = outcome(KEY_A, content_hash="sha256:old")
     live_old.run_id = "20260819T000000Z"
     live_new = outcome(KEY_A, content_hash="sha256:new")
@@ -303,7 +303,16 @@ def test_latest_index_picks_the_greatest_run_and_skips_dry_runs(ledger):
         ledger.record(row)
 
     assert ledger.latest_index()[KEY_A]["run_id"] == "20260820T000000Z"
-    assert ledger.latest_index(include_dry_run=True)[KEY_A]["run_id"] == "20260821T000000Z"
+    assert ledger.latest_index(prefer_live=False)[KEY_A]["run_id"] == "20260821T000000Z"
+
+
+def test_latest_index_falls_back_to_a_dry_run_only_when_nothing_live_exists(ledger):
+    """A clean clone without an API key has dry runs only; they are the current
+    extraction, and the row says so."""
+    dry = outcome(KEY_B, content_hash="sha256:x", dry_run=True)
+    ledger.record(dry)
+    row = ledger.latest_index()[KEY_B]
+    assert row["run_id"] == RUN and row["dry_run"] is True
 
 
 def test_latest_index_keeps_a_failed_latest_outcome(ledger):

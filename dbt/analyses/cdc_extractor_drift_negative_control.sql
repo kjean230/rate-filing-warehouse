@@ -9,9 +9,10 @@
 --   live-live   two live runs over the same bytes — extractor drift proper
 --   live-dry    a live run and a --dry-run over the same bytes — the dry run reads NO
 --               LLM field at all, so an equal hash is signal 3's LLM-invariance measured
---               directly ($0). Dry runs are never "current" (int_extract_run_current) and
---               never a version's extraction (int_document_versions); they appear HERE
---               only, as a control.
+--               directly ($0). A dry run never outranks a live run — as the current run
+--               (int_extract_run_current) or as a version's extraction
+--               (int_document_versions) — and stands in only when nothing live exists;
+--               here it appears as a control regardless.
 --
 -- Pairs exist only where both runs carry a hash key (has_normalized_hash). On the August
 -- corpus the first ledger-v2 live run (20260821T222316Z) is the first hashed run; the

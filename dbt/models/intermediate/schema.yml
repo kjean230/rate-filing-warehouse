@@ -232,9 +232,11 @@ unit_tests:
     description: >
       NULL means unknown, never unchanged: (a) the prior version's extraction is a
       ledger-v1 row with no hash; (b) the new version's hash was computed under a
-      different normalized_hash_version — a re-baseline, not a change; (c) a version
-      whose only extraction is a dry run has no live extraction at all. All three read
-      NULL for fields_moved while validator/bytes still report.
+      different normalized_hash_version — a re-baseline, not a change. Both read NULL
+      for fields_moved while validator/bytes still report. (c) is the contrast: a
+      version whose only extraction is a DRY run still has a hash — the hash is
+      LLM-invariant (docs/cdc-comparison.md §6b) — so the dry run stands in when
+      nothing live exists and fields_moved is decided.
     model: int_document_versions
     given:
       - input: ref('stg_ingest_manifest')
@@ -253,7 +255,7 @@ unit_tests:
           # (b) version boundary
           - {filing_id: b, document_role: urrt, content_hash: H1, run_id: 'E1', normalized_field_hash: N1, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
           - {filing_id: b, document_role: urrt, content_hash: H2, run_id: 'E2', normalized_field_hash: N9, normalized_hash_version: 2, has_normalized_hash: true, dry_run: false}
-          # (c) the new bytes were only ever dry-run extracted
+          # (c) the new bytes were only ever dry-run extracted — the dry run stands in
           - {filing_id: c, document_role: urrt, content_hash: H1, run_id: 'E1', normalized_field_hash: N1, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
           - {filing_id: c, document_role: urrt, content_hash: H2, run_id: 'E3', normalized_field_hash: N2, normalized_hash_version: 1, has_normalized_hash: true, dry_run: true}
     expect:
@@ -263,7 +265,7 @@ unit_tests:
         - {filing_id: b, content_version_seq: 1, validator_moved: null, bytes_moved: null, fields_moved: null, prior_normalized_field_hash: null, normalized_hash_version: 1, prior_normalized_hash_version: null, extract_run_id: 'E1'}
         - {filing_id: b, content_version_seq: 2, validator_moved: true, bytes_moved: true, fields_moved: null, prior_normalized_field_hash: N1, normalized_hash_version: 2, prior_normalized_hash_version: 1, extract_run_id: 'E2'}
         - {filing_id: c, content_version_seq: 1, validator_moved: null, bytes_moved: null, fields_moved: null, prior_normalized_field_hash: null, normalized_hash_version: 1, prior_normalized_hash_version: null, extract_run_id: 'E1'}
-        - {filing_id: c, content_version_seq: 2, validator_moved: true, bytes_moved: true, fields_moved: null, prior_normalized_field_hash: N1, normalized_hash_version: null, prior_normalized_hash_version: 1, extract_run_id: null}
+        - {filing_id: c, content_version_seq: 2, validator_moved: true, bytes_moved: true, fields_moved: true, prior_normalized_field_hash: N1, normalized_hash_version: 1, prior_normalized_hash_version: 1, extract_run_id: 'E3'}
 
   - name: versions_are_episodes_and_failed_sightings_open_nothing
     description: >
@@ -287,9 +289,10 @@ unit_tests:
 
   - name: extract_run_current_ignores_dry_runs_and_reads_v1_as_live
     description: >
-      A later dry-run outcome row (run E3) must not become the filing's current run; the
-      latest LIVE run (E2) is. A v1 row (dry_run NULL — the key did not exist) is read as
-      live. A filing whose only extraction is a dry run (g) has no current run at all.
+      A later dry-run outcome row (run E3) must not outrank the filing's latest LIVE run
+      (E2). A v1 row (dry_run NULL — the key did not exist) is read as live. A filing whose
+      only extraction is a dry run (g — a clean clone without an API key) takes that dry
+      run as current: it is the extraction there is.
     model: int_extract_run_current
     given:
       - input: ref('stg_extraction_outcomes')
@@ -301,6 +304,7 @@ unit_tests:
     expect:
       rows:
         - {filing_id: f, run_id: 'E2'}
+        - {filing_id: g, run_id: 'E3'}
 
   - name: scd2_versions_a_label_change
     description: >

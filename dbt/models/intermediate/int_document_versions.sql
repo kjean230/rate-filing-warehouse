@@ -128,8 +128,10 @@ versions as (
 
 ),
 
--- The latest LIVE extraction of each (key, bytes): dry runs excluded for the same
--- reason as int_extract_run_current; a v1 row lacks the flag and is read as live.
+-- The latest extraction of each (key, bytes), live preferred over dry for the same
+-- reason as int_extract_run_current (a dry run stands in only when nothing live exists —
+-- its hash is a valid signal-3 source, measured LLM-invariant, docs/cdc-comparison.md
+-- §6b); a v1 row lacks the flag and is read as live.
 ranked_extractions as (
 
     select
@@ -144,11 +146,10 @@ ranked_extractions as (
         has_normalized_hash,
         row_number() over (
             partition by filing_id, document_role, content_hash
-            order by run_id desc, source_line desc
+            order by coalesce(dry_run, false), run_id desc, source_line desc
         ) as _rn
     from {{ ref('stg_extraction_outcomes') }}
-    where not coalesce(dry_run, false)
-        and content_hash is not null
+    where content_hash is not null
 
 ),
 

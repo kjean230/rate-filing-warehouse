@@ -90,7 +90,14 @@ only when a prior full-corpus run exists; skipped for `--filing` runs with the r
 gate. The negative test withholds the resolution step and asserts the refusal, like the
 other six (`test_a_finding_that_vanishes_with_no_resolution_fails_the_gate`).
 
-## Honest limitation
+## Honest limitations
+
+Resolution is per **identity**, not per physical row. Adopted misses key on
+`<document_role>.<field_name>`, so several misses in one filing share an identity (on the
+real store: 16 adopted `JUSTIFICATION_IMPACT_GROUNDED` rows are 10 identities; 669 rows are
+663 identities) and clear with one `resolved` row. `int_quarantine_current` collapses the
+same way, so the warehouse and the resolver agree; gate 2 reconciles because it counts
+this run's rows, of which the resolution row is one.
 
 Justification-grain findings use an ordinal subject key (`<driver_category>#<index>`,
 `pipeline/validate/subjects.py`) because a `RateJustification` row has no natural key. An

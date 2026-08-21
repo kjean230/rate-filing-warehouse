@@ -155,9 +155,10 @@ class ExtractionOutcome:
     normalized_field_count: int = 0
 
     # A dry run writes real outcome rows (that is what makes the gate exercisable
-    # without an API key) but must never become a filing's CURRENT extraction:
-    # every LLM-read field is absent from it. Flagged here so the warehouse and
-    # `rfp-cdc detect` can skip it; a v1 row lacks the key and is read as live.
+    # without an API key) but must never OUTRANK a live extraction: every LLM-read
+    # field is absent from it. Flagged here so the warehouse, validation and
+    # `rfp-cdc detect` prefer a live run whenever one exists and fall back to the
+    # dry run only when nothing live does; a v1 row lacks the key and reads as live.
     dry_run: bool = False
 
     ledger_version: int = LEDGER_VERSION
@@ -249,26 +250,28 @@ class ExtractionLedger:
     def read_field_misses(self, run_id: str | None = None) -> Iterator[dict]:
         yield from _read_jsonl(self.field_misses_path, run_id)
 
-    def latest_index(self, *, include_dry_run: bool = False) -> dict[tuple[str, str], dict]:
+    def latest_index(self, *, prefer_live: bool = True) -> dict[tuple[str, str], dict]:
         """Latest outcome row per (filing_id, document_role) — the mirror of
         `Manifest.latest_index()`, on the extraction side of the seam.
 
         "Latest" is the greatest run_id (compact-UTC stamps sort lexically; ties
-        resolve to the later line). Dry-run rows are skipped by default for the
-        same reason `int_extract_run_current` skips them: a dry run is not an
-        extraction of the document's LLM-read fields, so it cannot stand as the
-        document's current extraction. A v1 row lacks the `dry_run` key and is
-        read as live (ADR 0017 — every v1 run that is current on the real corpus
-        is a live run). Failed rows are kept: a failure IS the latest outcome, and
-        hiding it would make "last attempt crashed" look like "never attempted".
+        resolve to the later line) — with one preference, the same one
+        `int_extract_run_current` applies: a LIVE row outranks any dry-run row,
+        however new the dry run is. A dry run is not an extraction of the
+        document's LLM-read fields, so it must never replace a live one; it stands
+        as the current extraction only when nothing live exists for the key (a
+        clean clone without an API key), and the returned row says so
+        (`dry_run: true`). A v1 row lacks the `dry_run` key and is read as live
+        (ADR 0017 — every v1 run that is current on the real corpus is a live
+        run). Failed rows are kept: a failure IS the latest outcome, and hiding it
+        would make "last attempt crashed" look like "never attempted".
+        `prefer_live=False` returns the plain latest row regardless.
         """
         index: dict[tuple[str, str], dict] = {}
         for row in self.read_outcomes():
-            if not include_dry_run and row.get("dry_run"):
-                continue
             key = (row["filing_id"], row["document_role"])
             current = index.get(key)
-            if current is None or row.get("run_id", "") >= current.get("run_id", ""):
+            if current is None or _outranks(row, current, prefer_live):
                 index[key] = row
         return index
 
@@ -391,6 +394,16 @@ class ExtractionLedger:
             if row["status"] in (OutcomeStatus.PARTIAL.value, OutcomeStatus.FAILED.value):
                 return 1
         return 0
+
+
+def _outranks(row: dict, current: dict, prefer_live: bool) -> bool:
+    """Does `row` replace `current` as a key's latest outcome? Live beats dry
+    (when preferred); within a class, the greater run_id wins, ties to the later line."""
+    if prefer_live:
+        row_live, current_live = not row.get("dry_run"), not current.get("dry_run")
+        if row_live != current_live:
+            return row_live
+    return row.get("run_id", "") >= current.get("run_id", "")
 
 
 def _read_jsonl(path: Path, run_id: str | None) -> Iterator[dict]:
