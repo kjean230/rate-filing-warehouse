@@ -121,6 +121,14 @@ class OregonAdapter(SourceAdapter):
         )
         item_key = str(item.get("Id")) if item.get("Id") is not None else None
 
+        # Selected since Phase 1 (SELECT_FIELDS) and discarded until now. It is the
+        # one number Oregon publishes independently of any document, so it is the
+        # only genuinely independent check on the filing-grain rate change — URRT
+        # field 1.13 is `#VALUE!` in all four workbooks. Kept verbatim; see the note
+        # on ManifestRow.avg_rate_request_posted for why it is not parsed here.
+        posted_rate = item.get("Average_x0020_Rate_x0020_Request")
+        posted_rate = str(posted_rate).strip() if posted_rate not in (None, "") else None
+
         refs: list[DocumentRef] = []
         seen_roles: dict[str, int] = {}
         for href, label in self._document_links(item.get("Filing_x0020_documents") or ""):
@@ -149,6 +157,7 @@ class OregonAdapter(SourceAdapter):
                     plan_year=self.config.plan_year,
                     market=self.config.market,
                     source_item_key=item_key,
+                    avg_rate_request_posted=posted_rate,
                     raw_label=label or None,
                 )
             )

@@ -1,0 +1,481 @@
+# Phase 3 data-quality rules. Nothing rule-shaped belongs in code (CLAUDE.md).
+#
+# ---------------------------------------------------------------------------
+# THE ONE THING TO UNDERSTAND BEFORE EDITING THIS FILE
+# ---------------------------------------------------------------------------
+#
+# There is no single validation situation here. There are four, and they differ
+# in KIND, not merely in threshold. Writing this file as though one rule shape
+# fits all of them produces rules that cannot fire, or that fire on the wrong
+# thing — and this project has already measured an example of the second.
+#
+#   intra_row     a predicate over one row's own fields
+#   intra_filing  a plan row against its filing row, or an aggregate over a filing
+#   cross_source  two INDEPENDENTLY OBTAINED values of the SAME field, same key
+#   grounding     a narrative row's evidence — never a number to reconcile
+#
+# `sources_at_grain` below is the enforcement, not a comment. A `cross_source`
+# rule scoped to a state and grain that has one source FAILS TO LOAD.
+#
+# ---------------------------------------------------------------------------
+# The measurement that decided the Oregon design
+# ---------------------------------------------------------------------------
+#
+# ADR 0007 and the Phase 2 handoff both describe Oregon plan rows as checkable
+# "URRT cell vs PDF extraction — two independent machine-readable sources."
+# Measured against the retrieved documents, that check does not exist and the
+# obvious construction of it is wrong:
+#
+#   * Oregon plan rows in data/extracted/ come from the URRT only. `rate_tables`
+#     is skipped (superseded_by_urrt) and only 2 of 4 carriers post one.
+#   * Every Oregon rate_request PDF DOES carry a plan table — but its "% Change"
+#     column is the change in the plan's BASE RATE, not URRT field 1.11.
+#     BridgeSpan 63474OR0600007: URRT 1.11 = 0.1425, PDF = 13.1%. Across every
+#     row parseable in a probe: 0 agree, 17 disagree.
+#
+# So Oregon has ONE source at plan grain, like Pennsylvania. What Oregon has
+# instead is a workbook that is internally redundant, which is a different and
+# weaker claim than a second source — and it is stated that way throughout.
+# See ADR 0008.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# What actually exists, per grain, per state.
+#
+# Asserted against the ingest manifest's document roles at load time, so this
+# block cannot drift into a comfortable fiction. It is the reason a rule that
+# cannot fire is unwritable rather than merely discouraged.
+# ---------------------------------------------------------------------------
+
+sources_at_grain:
+  plan:
+    # Pennsylvania: the filing packet's Rate Template. No URRT, no PY2027 PUF
+    # (ADR 0007). PA is ~80% of the fact table and has no second source.
+    PA: [filing_packet]
+    # Oregon: the workbook. See the measurement note above for why the PDF is
+    # not a second source at this grain.
+    OR: [urrt]
+  filing:
+    PA: [filing_packet]
+    # Three, and only here. The urrt and rate_request rows are two independent
+    # reads of the same filing; sharepoint_list is the manifest column added at
+    # schema v2 (ADR 0011) and is the only value published independently of any
+    # document.
+    OR: [urrt, rate_request, sharepoint_list]
+  justification:
+    PA: [filing_packet]
+    OR: [rate_request, cost_containment]
+
+# ---------------------------------------------------------------------------
+# Fields the SOURCE ITSELF cannot state.
+#
+# URRT fields 1.12, 1.13, 2.8, 2.15-2.23 and 3.2 are cached as the literal
+# string `#VALUE!` in all four Oregon workbooks — the files ship with macros
+# disabled and formulas uncalculated (ADR 0006). Phase 2 records those as
+# `cell_error`, never as None.
+#
+# Any rule whose subject field appears here MUST declare `on_cell_error`. A
+# presence rule firing "missing" on one of these would be reporting the wrong
+# fact: the source spoke, and what it said is unusable.
+# ---------------------------------------------------------------------------
+
+cell_error_fields:
+  - avg_rate_change_requested   # URRT 1.13, Submission Level Rate Increase %
+  - current_premium_pmpm        # URRT 2.15-2.23 block
+  - loss_ratio
+  - plan_adjusted_index_rate    # cached as formatted text; CellError when unparseable
+  - calibrated_plan_adjusted_index_rate
+
+# ---------------------------------------------------------------------------
+# Phase 2 findings this layer NAMES rather than re-derives.
+#
+# `field_misses.jsonl` already records rule-shaped reasons per field. Phase 3
+# does not re-open the documents to rediscover them — it assigns each a rule id
+# and lands it in the quarantine store, marked `origin: adopted`.
+#
+# The loader asserts every reason string present in field_misses.jsonl has a
+# mapping here, so a new Phase 2 reason cannot arrive unmapped and silent.
+# ---------------------------------------------------------------------------
+
+adopted_reasons:
+  outside_carrier_stated_range: PA_PLAN_RATE_IN_STATED_RANGE
+  cell_error: URRT_FIELD_UNUSABLE_AT_SOURCE
+  anchor_not_found: ANCHOR_NOT_LOCATED
+  not_present_in_source: FIELD_NOT_STATED_BY_SOURCE
+  unparseable: FIELD_UNPARSEABLE
+  ungrounded_in_evidence: JUSTIFICATION_IMPACT_GROUNDED
+  window_exceeds_token_ceiling: WINDOW_EXCEEDS_TOKEN_CEILING
+
+
+rules:
+
+  # =========================================================================
+  # OREGON — plan grain. Internal consistency, NOT a second source.
+  # =========================================================================
+
+  - id: OR_URRT_CALIBRATION_IDENTITY
+    kind: intra_filing
+    grain: plan
+    severity: error
+    scope: {state: [OR]}
+    check: arithmetic_identity
+    on_cell_error: not_applicable
+    description: >-
+      URRT field 3.11 x 3.12 x 3.13 x 3.14 must equal field 3.15. The workbook
+      states both the inputs and the result, so the template's own arithmetic is
+      checkable without any second document.
+    params:
+      factors: [plan_adjusted_index_rate, calib_age, calib_geo, calib_tobacco]
+      target: calibrated_plan_adjusted_index_rate
+      rel_tolerance: "0.005"
+      # 3.12-3.14 are FILING-level in the template: one calibration applies to
+      # the whole submission, so only the first plan column carries them. Without
+      # broadcasting, this rule evaluates 4 rows of 66 instead of 55.
+      broadcast: [calib_age, calib_geo, calib_tobacco]
+      # A Terminated plan carries a zero calibrated rate. Zero is not a failed
+      # identity, it is the absence of a rate to calibrate — measured: all 11
+      # zero-valued rows in the corpus are Terminated.
+      inapplicable_when_target_is_zero: true
+
+  - id: OR_NEW_TERMINATED_ZERO_RATE
+    kind: intra_row
+    grain: plan
+    severity: error
+    scope: {state: [OR]}
+    check: iff
+    description: >-
+      A plan carries a zero cumulative rate change if and only if it is New or
+      Terminated — there is no prior-year rate to change from. Measured 66/66 in
+      the corpus, both directions.
+
+      This matters downstream, not just here: 24 of Oregon's 66 rows are 0% for a
+      structural reason, and averaging them into a requested rate change at Phase
+      4 would understate it. The reverse direction catches a parse that produced
+      a zero for any other reason.
+    params:
+      condition: {field: plan_category, in: [New, Terminated]}
+      consequence: {field: cumulative_rate_change_pct, equals: "0"}
+
+  # =========================================================================
+  # PENNSYLVANIA — plan grain. Internal only. ~80% of the fact table.
+  # =========================================================================
+
+  - id: PA_PLAN_RATE_IN_STATED_RANGE
+    kind: intra_filing
+    grain: plan
+    severity: error
+    scope: {state: [PA]}
+    check: range
+    description: >-
+      Every plan rate must fall inside the range the carrier states in its own
+      cover letter. PA publishes no URRT and there is no PY2027 PUF, so this is
+      the only check available on this state's plan rows.
+
+      Expect ZERO live violations and 54 adopted ones. `validate_against_stated_
+      range` applies this bound at EXTRACTION time, so a rejected value never
+      reaches data/extracted/ — Phase 2 records it as a field miss instead. This
+      rule re-expresses the bound so it is nameable and reportable, and so a
+      future extract that bypassed the check would be caught. It does not
+      re-discover the 54; it names them. See ADR 0008.
+    params:
+      field: cumulative_rate_change_pct
+      min_from_filing: rate_change_min
+      max_from_filing: rate_change_max
+      tolerance: "0.005"
+
+  - id: PA_PLAN_RATE_NOT_DEGENERATE
+    kind: intra_filing
+    grain: plan
+    severity: error
+    scope: {state: [PA]}
+    check: not_degenerate
+    description: >-
+      A filing's parsed plan rates must not all be the same value. An identical
+      rate on every plan is the signature of a filing-level average lifted from a
+      summary row, not of plan-level extraction.
+
+      This is the one check here that finds something nothing else can. The `ghp`
+      failure — 54 plans all at 2.00% — was caught only because that carrier
+      states a range, and only 8 of 15 do. Measured: `ah` (16 plans, all 11.30%),
+      `ahs` (24, all 13.10%) and `upmchn` (68, all 10.90%) show the same
+      signature and NONE of them was caught. `gqo` (5 distinct over 20) and
+      `caac` (20 distinct over 36) pass.
+
+      Severity is `error` and every row in the group is quarantined, because the
+      whole group is suspect — there is no way to tell which of the identical
+      values, if any, is the real one.
+    params:
+      field: cumulative_rate_change_pct
+      # Below this, identical values are unremarkable. `khpc` has one plan and
+      # `upmchp` has one parsed rate; neither is evidence of anything.
+      min_rows: 3
+
+  - id: PA_PLAN_RATE_PRESENT
+    kind: intra_row
+    grain: plan
+    severity: warn
+    scope: {state: [PA]}
+    check: present
+    description: >-
+      Every plan row should carry a rate change. 417 of 583 do not, across eight
+      carriers whose Rate Template slice did not parse.
+
+      Deliberately `warn`, and deliberately present. Improving the parser is
+      Phase 2-shaped work and is not being done here — but carrying the shortfall
+      as a sentence in a handoff makes it invisible, while carrying it as 417
+      quarantine rows with a rule id makes it addressable. See ADR 0008.
+    params:
+      field: cumulative_rate_change_pct
+
+  # =========================================================================
+  # BOTH STATES — plan grain
+  # =========================================================================
+
+  - id: PLAN_AV_WITHIN_METAL_BAND
+    kind: intra_row
+    grain: plan
+    severity: error
+    scope: {state: [PA, OR]}
+    check: value_in_band
+    description: >-
+      A plan's actuarial value must sit inside the ACA de-minimis band for the
+      metal level it claims. Independent of the rate change, so it validates PA
+      rows the rate rules cannot reach.
+
+      Bands are the statutory ±2 points, with expanded bronze. Measured against
+      the corpus before being written here: Bronze 0.5947-0.6491, Silver
+      0.7005-0.7198, Gold 0.7803-0.8197, Platinum 0.9126-0.9198 — every observed
+      value sits inside, so this rule is expected to pass and would fire on a
+      genuine mismatch rather than on a band chosen too tightly.
+    params:
+      key_field: metal
+      value_field: av_metal_value
+      bands:
+        Bronze: ["0.58", "0.65"]
+        Silver: ["0.66", "0.72"]
+        Gold: ["0.76", "0.82"]
+        Platinum: ["0.88", "0.92"]
+        # Catastrophic plans carry NO statutory AV band. Observed 0.530-0.600
+        # across 15 PA rows — inside no band, and correctly so. Listing it as
+        # unbanded is the difference between a rule that declines to evaluate
+        # and a rule that reports 15 false violations.
+        Catastrophic: null
+      # Oregon Terminated plans carry a zero AV, same reason as the zero rate.
+      inapplicable_when_zero: true
+
+  - id: PLAN_ID_STATE_MATCHES_FILING
+    kind: intra_filing
+    grain: plan
+    severity: error
+    scope: {state: [PA, OR]}
+    check: id_segment_matches
+    description: >-
+      The two-letter state segment of a Standard Component ID must match the
+      filing's state. The schema validates the ID's SHAPE at construction; it
+      cannot know which filing the row belongs to, so this is the half of that
+      check only this layer can make.
+    params:
+      field: plan_id_hios
+      segment: [5, 7]
+
+  - id: PLAN_RATE_WITHIN_PLAUSIBLE_BOUNDS
+    kind: intra_row
+    grain: plan
+    severity: error
+    scope: {state: [PA, OR]}
+    check: range
+    description: >-
+      A floor, not a claim. A cumulative rate change outside -50%..+100% is a
+      unit error or a misparse rather than a filing. This catches the specific
+      failure of a percentage stored unscaled — 11.9 instead of 0.119 — which
+      would otherwise pass every other numeric rule here.
+    params:
+      field: cumulative_rate_change_pct
+      min: "-0.5"
+      max: "1.0"
+
+  # =========================================================================
+  # FILING GRAIN
+  # =========================================================================
+
+  - id: OR_FILING_IDENTITY_AGREES_ACROSS_SOURCES
+    kind: cross_source
+    grain: filing
+    severity: error
+    scope: {state: [OR]}
+    check: equals_across_sources
+    description: >-
+      Oregon emits two filing rows per filing — one read from the URRT's fixed
+      cells, one from labeled anchors in the rate request PDF. Where both state
+      the same field, they must agree.
+
+      Stated honestly: the overlap is two IDENTIFIERS, not measures. This is a
+      real cross-source check and a narrow one.
+    params:
+      fields: [hios_issuer_id, effective_date]
+
+  - id: OR_AVG_RATE_AGREES_WITH_LIST
+    kind: cross_source
+    grain: filing
+    severity: error
+    scope: {state: [OR]}
+    check: equals_manifest_field
+    # Oregon emits two filing rows and the URRT's carries this field as a
+    # CellError, because field 1.13 is `#VALUE!` in all four workbooks. Comparing
+    # an unusable cell against the list would report a disagreement that is really
+    # the workbook's defect — already recorded as a `cell_error` field miss and
+    # adopted under URRT_FIELD_UNUSABLE_AT_SOURCE.
+    on_cell_error: not_applicable
+    description: >-
+      The average rate change read from the rate request PDF must agree with the
+      figure Oregon's own list API posts beside the documents.
+
+      This is the only genuinely INDEPENDENT number in the project. The URRT's
+      own field 1.13 is `#VALUE!` in all four workbooks, so without the list
+      value this measure has exactly one source.
+
+      The tolerance is a property of the source, not a fudge: the list publishes
+      11.7%, 12.2%, 25%, 12.2% while the PDF anchors read 11.71%, 12.23%, 25%,
+      12.22%. Comparing at list precision is the honest comparison.
+    params:
+      extract_field: avg_rate_change_requested
+      manifest_field: avg_rate_request_posted
+      tolerance: "0.005"
+
+  - id: FILING_TOI_IN_SCOPE
+    kind: intra_row
+    grain: filing
+    severity: error
+    scope: {state: [PA, OR]}
+    check: matches_pattern
+    description: >-
+      The scope fence expressed as data. SERFF TOI H16I is ACA individual major
+      medical; anything else in this store means the ingest filter let something
+      through.
+
+      Only Oregon populates this, from SERFF's structured metadata block. PA
+      packets do not state it, so PA rows evaluate `inapplicable` — which is the
+      correct verdict and not a gap to paper over.
+    params:
+      field: toi_code
+      pattern: "^H16I"
+
+  - id: FILING_PLAN_COUNT_MATCHES_STATED
+    kind: intra_filing
+    grain: filing
+    severity: error
+    scope: {state: [PA, OR]}
+    check: count_equals
+    description: >-
+      Where a carrier states how many plans its filing covers, that many plan
+      rows must have been extracted. A carrier-authored check on whether plan
+      extraction dropped anything, free to apply.
+    params:
+      count_of: plan
+      equals_field: plan_count_stated
+
+  - id: FILING_HAS_TRACKING_NUMBER
+    kind: intra_row
+    grain: filing
+    severity: warn
+    scope: {state: [PA, OR]}
+    check: present
+    description: >-
+      ADR 0002 chose a source-local filing key and accepted a Phase 4
+      `int_filing_crosswalk` as the price, to be populated from this field. A
+      filing without one cannot join to the PUF or the federal API.
+
+      `warn` because it blocks nothing in Phase 3, and it is Phase 4's problem
+      arriving early rather than a defect in this data.
+    params:
+      field: serff_tracking_number
+
+  # =========================================================================
+  # NARRATIVE GRAIN — grounding is the only checkable property
+  # =========================================================================
+
+  - id: JUSTIFICATION_IMPACT_GROUNDED
+    kind: grounding
+    grain: justification
+    severity: error
+    scope: {state: [PA, OR]}
+    check: evidence_contains_number
+    description: >-
+      A stated numeric impact must appear, as a number, in the row's own evidence
+      quote. A narrative cannot be reconciled against a second source; grounding
+      is the only thing about it that is checkable at all.
+
+      EXPECTED TO PASS 100%, AND THAT IS NOT A STRONG RESULT. The schema's
+      `_grounding` validator already refuses to CONSTRUCT an ungrounded row, so
+      every row that reached disk passed this test once already. This rule is a
+      tripwire for a schema bypass or a hand-edited file — not a discovery
+      mechanism. Real grounding failures arrive here by adoption of
+      `ungrounded_in_evidence` misses, which is where they were actually caught.
+    params:
+      field: quantified_impact_pct
+      evidence_field: evidence_quote
+
+  # =========================================================================
+  # ADOPTION-ONLY rules.
+  #
+  # No live predicate. They exist so that a Phase 2 field miss lands in the
+  # quarantine store under a rule id rather than as an unattributed row — the
+  # Phase 3 gate requires every quarantined row to name a rule, and a finding
+  # inherited from the previous phase is still a finding.
+  #
+  # Their dq_results rows read `evaluated: 0` with a non-zero `adopted` count.
+  # That is legible, and distinct from a rule that failed to run.
+  # =========================================================================
+
+  - id: URRT_FIELD_UNUSABLE_AT_SOURCE
+    kind: intra_row
+    grain: filing
+    severity: warn
+    scope: {state: [OR]}
+    check: adopted_only
+    description: >-
+      The source cell holds a spreadsheet error rather than a value. Measured on
+      all four Oregon workbooks at field 1.13. `warn`, because the filing is not
+      defective — the published artifact is.
+
+  - id: ANCHOR_NOT_LOCATED
+    kind: intra_row
+    grain: filing
+    severity: warn
+    scope: {state: [PA, OR]}
+    check: adopted_only
+    description: >-
+      A labeled anchor found no match in the document. Distinct from the document
+      being silent: the extractor looked, with a pattern, and the pattern did not
+      hit.
+
+  - id: FIELD_NOT_STATED_BY_SOURCE
+    kind: intra_row
+    grain: filing
+    severity: warn
+    scope: {state: [PA, OR]}
+    check: adopted_only
+    description: >-
+      The extractor looked and the document does not state the field. The normal
+      case, and the reason a null alone is not enough information.
+
+  - id: FIELD_UNPARSEABLE
+    kind: intra_row
+    grain: filing
+    severity: warn
+    scope: {state: [PA, OR]}
+    check: adopted_only
+    description: The field was located and could not be parsed into its type.
+
+  - id: WINDOW_EXCEEDS_TOKEN_CEILING
+    kind: intra_row
+    grain: justification
+    severity: error
+    scope: {state: [PA, OR]}
+    check: adopted_only
+    description: >-
+      A located window exceeded the configured token ceiling and the call was
+      refused rather than truncated (ADR 0006 §5). Truncation is the worst silent
+      drop available to extraction, because the call succeeds and the output
+      parses.

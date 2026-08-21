@@ -46,7 +46,7 @@ from pipeline.extract.schema import (
     PlanType,
     RateJustification,
 )
-from pipeline.extract.text.pdf import PdfDocument, PdfError, clamp_section
+from pipeline.extract.text.pdf import AnchorHit, PdfDocument, PdfError, clamp_section
 from pipeline.extract.text.tables import (
     TableExtractionError,
     extract_plan_rows,
@@ -56,6 +56,32 @@ from pipeline.extract.text.tables import (
 from pipeline.extract.text.workbook import WorkbookError, read_urrt
 
 RANGE_PATTERN = re.compile(r"(-?[\d.]+)\s*%\s*to\s*(-?[\d.]+)\s*%")
+
+# Cross-check anchors whose value this phase ACTS on, and which must therefore be
+# persisted onto the filing row.
+#
+# ADR 0005 decision 5 demoted Pennsylvania's cover-letter anchors to cross-checks
+# because several of them return plausible wrong answers — `ah` answers "average
+# rate change requested" with a table-cell reference and a nearby regex reads
+# 40.90%, a different metric entirely. That demotion stands and these are still
+# not promoted to primary.
+#
+# But two of them are already load-bearing at primary strength, and only the
+# RECORDING was missing. `rate_change_range` is what `validate_against_stated_range`
+# uses to accept or reject every Pennsylvania plan rate — it rejected 54 values of
+# 2.00% on `pa-2027-indv-ghp` — and `plan_count_stated` is what the outcome ledger's
+# row-accounting assertion reconciles against. Both were computed, used, and then
+# discarded, leaving `rate_change_min`/`max` null on all 23 filing rows and making
+# Pennsylvania's only validation net unavailable to Phase 3.
+#
+# The principle, and it is narrower than "promote the cross-checks":
+# **persist the value that was actually enforced.** Anything else would leave the
+# recorded bound different from the bound that was applied.
+#
+# These two are also structurally safer than the demoted ones: `rate_change_range`
+# must match the literal `X% to Y%` shape rather than any nearby number, which is
+# what makes the `ah` failure mode unavailable to it.
+ENFORCED_CROSS_CHECKS = ("rate_change_range", "plan_count_stated")
 
 
 @dataclass
@@ -359,11 +385,12 @@ class ExtractionRunner:
 
         filing_rows = 0
         if document.document_role in ("filing_packet", "rate_request"):
-            filing = self._build_filing(
+            filing, enforced_notes = self._build_filing(
                 document, anchor_values, anchor_prov, cross_checks, llm_values, llm_prov
             )
             result.filings.append(filing)
             filing_rows = 1
+            notes.extend(enforced_notes)
             notes.extend(_disagreements(filing, cross_checks))
 
         plan_rows = 0
@@ -388,15 +415,23 @@ class ExtractionRunner:
                     )
                 )
 
-        justifications, jnotes, jcalls = self._extract_justifications(document, doc)
+        justifications, jnotes, jcalls, jmissed = self._extract_justifications(document, doc)
         result.justifications.extend(justifications)
         notes.extend(jnotes)
         call_ids.extend(jcalls)
+        # A justification dropped for an ungrounded number was a targeted
+        # `quantified_impact_pct` that did not survive. Counting the miss without
+        # counting the target breaks `targeted == populated + missed` — the same
+        # way the rejected plan rates above did, and caught the same way: by the
+        # gate refusing the run rather than by review.
+        targeted += len(jmissed)
+        missed.extend(jmissed)
 
         for miss in missed:
             self.ledger.record_miss(miss)
 
-        stated_plan_count = _as_int(cross_checks.get("plan_count_stated"))
+        count_hit = cross_checks.get("plan_count_stated")
+        stated_plan_count = _as_int(count_hit.value if count_hit else None)
         status = OutcomeStatus.EXTRACTED
         reason = None
         if missed or notes:
@@ -460,13 +495,20 @@ class ExtractionRunner:
             )
         return values, provenance, missed
 
-    def _run_cross_checks(self, document: ResolvedDocument, doc: PdfDocument) -> dict[str, str]:
+    def _run_cross_checks(
+        self, document: ResolvedDocument, doc: PdfDocument
+    ) -> dict[str, AnchorHit]:
         """Corroborating anchors. Recorded, never promoted to primary.
 
         Pennsylvania's cover-letter patterns live here because they are structurally
         unreliable across carriers — see the note in config/extraction_targets.yml.
+
+        Returns the whole `AnchorHit` rather than its value alone, because the two
+        checks this phase ACTS on (ENFORCED_CROSS_CHECKS) are persisted onto the
+        filing row and a persisted value needs a locator and its matched text — the
+        schema refuses a `regex_anchor` provenance with no evidence.
         """
-        out: dict[str, str] = {}
+        out: dict[str, AnchorHit] = {}
         for name, patterns in self.config.cross_checks_for(
             document.state, document.document_role
         ).items():
@@ -475,7 +517,7 @@ class ExtractionRunner:
                     pattern, first_n_pages=self.config.limits.identity_scan_pages
                 )
                 if hit:
-                    out[name] = hit.value
+                    out[name] = hit
                     break
         return out
 
@@ -565,10 +607,10 @@ class ExtractionRunner:
         document: ResolvedDocument,
         anchor_values: dict[str, Any],
         anchor_prov: dict[str, FieldProvenance],
-        cross_checks: dict[str, str],
+        cross_checks: dict[str, AnchorHit],
         llm_values: dict[str, Any] | None = None,
         llm_prov: dict[str, FieldProvenance] | None = None,
-    ) -> FilingExtract:
+    ) -> tuple[FilingExtract, list[str]]:
         # A regex anchor outranks the model where both produced a value. Anchors
         # are only ever promoted to primary when they are unambiguous and 100%
         # across the corpus (see config); where they are not, they live in
@@ -595,22 +637,94 @@ class ExtractionRunner:
             if name in anchor_prov:
                 provenance[name] = anchor_prov[name]
 
+        # The bounds this phase enforced. Applied LAST so the recorded value is the
+        # one that was acted on — see ENFORCED_CROSS_CHECKS. Where the model also
+        # produced a value, the anchor wins and the disagreement is returned as a
+        # note rather than resolved silently.
+        enforced, notes = self._enforced_values(document, cross_checks, values, provenance)
+        values.update(enforced)
+
         # Anything left over is a value with no origin, which the schema refuses.
         for name in [key for key in values if key not in provenance]:
             values.pop(name)
 
-        return FilingExtract(
-            filing_id=document.filing_id,
-            state=document.state,
-            plan_year=document.plan_year,
-            market=document.market,
-            run_id=self.run_id,
-            provenance=provenance,
-            **values,
+        return (
+            FilingExtract(
+                filing_id=document.filing_id,
+                state=document.state,
+                plan_year=document.plan_year,
+                market=document.market,
+                run_id=self.run_id,
+                provenance=provenance,
+                **values,
+            ),
+            notes,
         )
 
+    def _enforced_values(
+        self,
+        document: ResolvedDocument,
+        cross_checks: dict[str, AnchorHit],
+        existing: dict[str, Any],
+        provenance: dict[str, FieldProvenance],
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Persist the cross-check values this phase acted on, with provenance.
+
+        `rate_change_range` expands into two fields because the carrier states one
+        span — "Range of rate change requested: 11.3% to 14.4%" — and the schema
+        models its ends separately. Both ends carry the same locator and the same
+        matched line as evidence, which is accurate: they came from one match.
+
+        A range that does not parse produces nothing rather than a half-populated
+        bound. A single-ended bound would be worse than none, because
+        `validate_against_stated_range` returns every rate unfiltered unless BOTH
+        ends are present — so a persisted half-range would imply a check that did
+        not run.
+
+        `existing` holds whatever the model produced. The anchor overwrites it,
+        because the anchor's value is the one that was enforced — but the overwrite
+        is reported, not silent. That disagreement cannot be recovered later:
+        `_disagreements` compares the cross-check against the KEPT value, and by
+        then the kept value is the cross-check itself.
+        """
+        out: dict[str, Any] = {}
+        notes: list[str] = []
+
+        def take(field_name: str, value: Any, hit: AnchorHit) -> None:
+            prior = existing.get(field_name)
+            if prior is not None and not _equivalent(prior, value):
+                notes.append(
+                    f"{field_name}: enforced anchor value {value!r} overrode "
+                    f"model value {prior!r}"
+                )
+            out[field_name] = value
+            provenance[field_name] = FieldProvenance(
+                field_name=field_name,
+                method=ExtractionMethod.REGEX_ANCHOR,
+                source_document_role=document.document_role,
+                source_locator=hit.locator,
+                evidence=hit.evidence,
+            )
+
+        for name in ENFORCED_CROSS_CHECKS:
+            hit = cross_checks.get(name)
+            if hit is None:
+                continue
+            if name == "rate_change_range":
+                low, high = _parse_stated_range(hit.value)
+                if low is None or high is None:
+                    continue
+                take("rate_change_min", low, hit)
+                take("rate_change_max", high, hit)
+                continue
+            coerced = _coerce_filing_field(name, hit.value)
+            if coerced is None:
+                continue
+            take(name, coerced, hit)
+        return out, notes
+
     def _extract_pa_plans(
-        self, document: ResolvedDocument, doc: PdfDocument, cross_checks: dict[str, str]
+        self, document: ResolvedDocument, doc: PdfDocument, cross_checks: dict[str, AnchorHit]
     ) -> tuple[list[PlanRateExtract], list[str], dict[str, Decimal]]:
         table_config = self.config.plan_table_for(document.state, document.document_role)
         min_ids = table_config.min_plan_ids_per_page if table_config else 2
@@ -624,7 +738,8 @@ class ExtractionRunner:
         except TableExtractionError as exc:
             return [], [f"plan table extraction failed: {exc}"], {}
 
-        low, high = _parse_stated_range(cross_checks.get("rate_change_range"))
+        range_hit = cross_checks.get("rate_change_range")
+        low, high = _parse_stated_range(range_hit.value if range_hit else None)
         rates = {
             row.plan_id: row.values["cumulative_rate_change_pct"]
             for row in rows
@@ -679,16 +794,24 @@ class ExtractionRunner:
 
     def _extract_justifications(
         self, document: ResolvedDocument, doc: PdfDocument
-    ) -> tuple[list[RateJustification], list[str], list[str]]:
+    ) -> tuple[list[RateJustification], list[str], list[str], list[FieldMiss]]:
+        """Returns `(justifications, notes, call_ids, misses)`.
+
+        The misses are RETURNED rather than recorded here, so the caller can count
+        them as well as write them. Recording directly — which this did until the
+        first live run — writes a row to `field_misses.jsonl` that no
+        `fields_missed` counter knows about, and the gate's field-accounting
+        assertion refuses the run. That is the assertion working, twice now.
+        """
         headings = self.config.sections_for(document.state, document.document_role)
         if not headings:
-            return [], [], []
+            return [], [], [], []
 
         sections, not_found = doc.locate_sections(headings)
         sections = [clamp_section(s, self.config.limits.max_window_pages) for s in sections]
         notes = [f"sections not located: {', '.join(not_found)}"] if not_found else []
         if not sections:
-            return [], notes, []
+            return [], notes, [], []
 
         excerpt = "\n\n".join(
             f"### {section.key} — {section.heading} ({section.locator})\n{doc.window(section)}"
@@ -710,14 +833,17 @@ class ExtractionRunner:
                 excerpt=excerpt,
             )
         except LlmError as exc:
-            return [], [*notes, f"justification extraction failed: {exc}"], []
+            return [], [*notes, f"justification extraction failed: {exc}"], [], []
 
         justifications: list[RateJustification] = []
+        misses: list[FieldMiss] = []
         for entry in response.data.get("justifications", []) or []:
-            built = self._build_justification(document, entry, response.call_id, sections)
+            built, miss = self._build_justification(document, entry, response.call_id, sections)
             if built is not None:
                 justifications.append(built)
-        return justifications, notes, [response.call_id]
+            if miss is not None:
+                misses.append(miss)
+        return justifications, notes, [response.call_id], misses
 
     def _build_justification(
         self,
@@ -725,7 +851,12 @@ class ExtractionRunner:
         entry: dict[str, Any],
         call_id: str,
         sections: list[Any],
-    ) -> RateJustification | None:
+    ) -> tuple[RateJustification | None, FieldMiss | None]:
+        """Returns `(justification, miss)`. Exactly one is non-None, or both are None.
+
+        A `miss` is returned rather than recorded so the caller can count it — see
+        `_extract_justifications`.
+        """
         try:
             category = DriverCategory(entry.get("driver_category", "other"))
         except ValueError:
@@ -735,7 +866,7 @@ class ExtractionRunner:
         narrative = (entry.get("narrative") or "").strip()
         label = (entry.get("driver_label") or category.value).strip()
         if not quote or not narrative:
-            return None
+            return None, None
 
         impact = _to_decimal(entry.get("quantified_impact_pct"))
         if impact is not None:
@@ -756,39 +887,41 @@ class ExtractionRunner:
             )
 
         try:
-            return RateJustification(
-                filing_id=document.filing_id,
-                state=document.state,
-                plan_year=document.plan_year,
-                run_id=self.run_id,
-                driver_category=category,
-                driver_label=label,
-                narrative=narrative,
-                quantified_impact_pct=impact,
-                direction=_coerce_direction(entry.get("direction")),
-                source_document_role=document.document_role,
-                source_page_start=(section.page_start + 1) if section else None,
-                source_page_end=(section.page_end + 1) if section else None,
-                evidence_quote=quote,
-                confidence=_to_decimal(entry.get("confidence")),
-                provenance=provenance,
+            return (
+                RateJustification(
+                    filing_id=document.filing_id,
+                    state=document.state,
+                    plan_year=document.plan_year,
+                    run_id=self.run_id,
+                    driver_category=category,
+                    driver_label=label,
+                    narrative=narrative,
+                    quantified_impact_pct=impact,
+                    direction=_coerce_direction(entry.get("direction")),
+                    source_document_role=document.document_role,
+                    source_page_start=(section.page_start + 1) if section else None,
+                    source_page_end=(section.page_end + 1) if section else None,
+                    evidence_quote=quote,
+                    confidence=_to_decimal(entry.get("confidence")),
+                    provenance=provenance,
+                ),
+                None,
             )
         except ValueError:
             # Most often the grounding validator: a stated impact that does not
             # appear in its own evidence quote. Dropping the entry is correct —
-            # but it is dropped LOUDLY, as a field miss recorded by the caller.
-            self.ledger.record_miss(
-                FieldMiss(
-                    run_id=self.run_id,
-                    filing_id=document.filing_id,
-                    document_role=document.document_role,
-                    model_name="RateJustification",
-                    field_name="quantified_impact_pct",
-                    reason="ungrounded_in_evidence",
-                    detail=f"{label}: stated impact not present in its own evidence quote",
-                )
+            # but it is dropped LOUDLY, as a field miss the CALLER records and
+            # counts. Recording it here instead wrote a row nothing counted, which
+            # is what failed the gate on the first live run.
+            return None, FieldMiss(
+                run_id=self.run_id,
+                filing_id=document.filing_id,
+                document_role=document.document_role,
+                model_name="RateJustification",
+                field_name="quantified_impact_pct",
+                reason="ungrounded_in_evidence",
+                detail=f"{label}: stated impact not present in its own evidence quote",
             )
-            return None
 
     # -- helpers -------------------------------------------------------------
 
@@ -946,26 +1079,40 @@ def _parse_stated_range(text: str | None) -> tuple[Decimal | None, Decimal | Non
         return None, None
 
 
-def _disagreements(filing: FilingExtract, cross_checks: dict[str, str]) -> list[str]:
+def _equivalent(left: Any, right: Any) -> bool:
+    """Same tolerance `_disagreements` uses, so both report the same disagreements.
+
+    Decimals compare within 0.0005 — a carrier printing 12.2% and 12.23% for the
+    same figure is a rounding difference, not a contradiction. Everything else
+    compares case-insensitively on its string form.
+    """
+    if isinstance(left, Decimal) and isinstance(right, Decimal):
+        return abs(left - right) <= Decimal("0.0005")
+    return str(left).strip().lower() == str(right).strip().lower()
+
+
+def _disagreements(filing: FilingExtract, cross_checks: dict[str, AnchorHit]) -> list[str]:
     """Note where a corroborating anchor contradicts the value that was kept.
 
     Recorded, never silently resolved. A cross-check anchor is not reliable enough
     to overrule the primary — that is exactly why it was demoted — but a
     disagreement is real information and Phase 3 should see it rather than have to
     rediscover it.
+
+    ENFORCED_CROSS_CHECKS are skipped here: their value IS the value that was kept,
+    so comparing them to themselves would report agreement that means nothing. The
+    disagreement worth recording on those fields is between the anchor and the
+    model, and the anchor already won by construction in `_enforced_values`.
     """
     notes: list[str] = []
-    for name, raw in cross_checks.items():
+    for name, hit in cross_checks.items():
+        if name in ENFORCED_CROSS_CHECKS:
+            continue
         kept = getattr(filing, name, None)
         if kept is None:
             continue
-        corroborating = _coerce_filing_field(name, raw)
-        if corroborating is None:
-            continue
-        if isinstance(kept, Decimal) and isinstance(corroborating, Decimal):
-            if abs(kept - corroborating) <= Decimal("0.0005"):
-                continue
-        elif str(kept).strip().lower() == str(corroborating).strip().lower():
+        corroborating = _coerce_filing_field(name, hit.value)
+        if corroborating is None or _equivalent(kept, corroborating):
             continue
         notes.append(f"{name}: kept {kept!r}, cross-check anchor read {corroborating!r}")
     return notes

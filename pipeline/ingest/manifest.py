@@ -24,7 +24,12 @@ from pathlib import Path
 
 # Bumped when the field set changes. The log is append-only across phases, so a reader
 # needs to tell a version boundary from a bug.
-MANIFEST_SCHEMA_VERSION = 1
+#
+# v2 (Phase 3) added `avg_rate_request_posted`. Rows written before the bump stay at
+# v1 and are NOT rewritten — that is the whole reason this field exists. A reader
+# must treat the new column as ABSENT on a v1 row, never as a null meaning "the
+# source posted nothing". See ADR 0011.
+MANIFEST_SCHEMA_VERSION = 2
 
 MANIFEST_RELPATH = Path("_manifest") / "ingest_manifest.jsonl"
 
@@ -39,6 +44,7 @@ FIELD_ORDER = (
     "carrier_label_raw",
     "plan_year",
     "market",
+    "avg_rate_request_posted",
     "source_url",
     "source_item_key",
     "http_status",
@@ -100,6 +106,21 @@ class ManifestRow:
     plan_year: int
     market: str
     source_url: str
+
+    # The average rate change as the SOURCE ITSELF posts it, alongside the documents —
+    # Oregon's SharePoint list field `Average_x0020_Rate_x0020_Request`. Null for PA,
+    # which posts no such field.
+    #
+    # Stored verbatim as text, not parsed to a number. The list publishes '11.7%',
+    # '25%' and '12.2%' — inconsistent precision that is itself a fact about the
+    # source. Parsing here would decide a rounding question at ingest time that
+    # belongs to whoever compares the values; ADR 0003's rule that the manifest
+    # records what was retrieved rather than what was concluded applies.
+    #
+    # This is Oregon's only INDEPENDENT number: the URRT's own field 1.13 is `#VALUE!`
+    # in all four workbooks (ADR 0006), so without this the filing-grain rate change
+    # has exactly one source, the rate request PDF. Added at v2; see ADR 0011.
+    avg_rate_request_posted: str | None = None
 
     # Source-local opaque handle: SharePoint list item Id for OR, DAM path segment for
     # PA. NOT a URL — §8 risk 3 forbids persisting Oregon's URLs as keys. This is what

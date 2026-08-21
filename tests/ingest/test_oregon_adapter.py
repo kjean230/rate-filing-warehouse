@@ -206,6 +206,46 @@ def test_source_item_key_is_the_list_id_not_a_url(policy, clock):
     assert "http" not in bridgespan.source_item_key
 
 
+def test_posted_average_rate_is_carried_onto_every_document_of_a_filing(policy, clock):
+    """Selected since Phase 1, discarded until schema v2. See ADR 0011.
+
+    The value is per-FILING but manifest rows are per-DOCUMENT, so it repeats
+    across a carrier's 3-4 documents — the same shape as carrier_label_raw. That
+    repetition is what lets a single manifest row answer "what did the source say
+    this filing's average was" without a join.
+    """
+    refs = make_adapter(policy, clock).discover()
+    posted = {r.filing_id: r.avg_rate_request_posted for r in refs}
+    assert posted == {
+        "or-2027-indv-bridgespan-health-company": "11.7%",
+        "or-2027-indv-kaiser-foundation-health-plan-of-the-northwest": "12.2%",
+        "or-2027-indv-moda-health-plan-inc": "25%",
+        "or-2027-indv-regence-bluecross-blueshield-of-oregon": "12.2%",
+    }
+    bridgespan = [r for r in refs if "bridgespan" in r.filing_id]
+    assert len(bridgespan) > 1
+    assert {r.avg_rate_request_posted for r in bridgespan} == {"11.7%"}
+
+
+def test_posted_average_rate_is_not_normalized(policy, clock):
+    """'25%' stays '25%'.
+
+    The list publishes inconsistent precision and the PDF anchors read 11.71%,
+    12.23%, 25%, 12.22%. Deciding at ingest how many decimals matter would settle
+    the comparison before Phase 3 gets to make it.
+    """
+    refs = make_adapter(policy, clock).discover()
+    moda = next(r for r in refs if "moda" in r.filing_id)
+    assert moda.avg_rate_request_posted == "25%"
+
+
+def test_a_list_item_without_a_posted_rate_yields_none_not_an_empty_string(policy, clock):
+    """A blank list cell is an absence, and must not become a value to compare."""
+    blanked = [{**item, "Average_x0020_Rate_x0020_Request": ""} for item in PY2027_ITEMS]
+    refs = make_adapter(policy, clock, items=blanked).discover()
+    assert all(ref.avg_rate_request_posted is None for ref in refs)
+
+
 def test_non_document_links_are_ignored(policy, clock):
     noisy = [
         {
