@@ -28,6 +28,15 @@ Five assertions, all in `assert_gate()`, all tested:
 `FieldMiss` is the field-level companion. A field that was targeted and not found
 produces a row naming it, so "the document did not say" is recorded rather than
 inferred from a null.
+
+**Ledger v2 (Phase 5, ADR 0017).** Each outcome row now also carries the
+measurement Phase 5's change detection compares across content versions —
+`normalized_field_hash` (+ `normalized_hash_version`, `normalized_field_count`) —
+and `dry_run`, so a `--dry-run` run can never again be mistaken for a current
+extraction. Rows written before the bump are NOT rewritten: they lack the keys and
+must be read as lacking them (ADR 0011's boundary rule, third use). A reader that
+coalesces an absent `normalized_field_hash` to "unchanged" or an absent `dry_run`
+to "dry" is wrong; `stg_extraction_outcomes` exposes the key-existence flags.
 """
 
 from __future__ import annotations
@@ -38,7 +47,10 @@ from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-LEDGER_VERSION = 1
+# v2 (Phase 5) added normalized_field_hash / normalized_hash_version /
+# normalized_field_count / dry_run to ExtractionOutcome. FieldMiss rides the bump
+# unchanged in shape. v1 rows stay v1 on disk — see the module docstring.
+LEDGER_VERSION = 2
 
 OUTCOMES_RELPATH = Path("_log") / "extraction_outcomes.jsonl"
 FIELD_MISSES_RELPATH = Path("_log") / "field_misses.jsonl"
@@ -133,6 +145,21 @@ class ExtractionOutcome:
     llm_call_ids: list[str] = field(default_factory=list)
     duration_ms: int | None = None
 
+    # -- Phase 5 / ledger v2: signal 3, measured here because this is the layer
+    #    that read the bytes (pipeline/cdc/normalize.py is the one implementation).
+    #    None with count 0 means UNDEFINED (no source-determined field in this
+    #    document), never "unchanged". The version pins the field set + canonical
+    #    form; hashes are only comparable at equal versions.
+    normalized_field_hash: str | None = None
+    normalized_hash_version: int | None = None
+    normalized_field_count: int = 0
+
+    # A dry run writes real outcome rows (that is what makes the gate exercisable
+    # without an API key) but must never become a filing's CURRENT extraction:
+    # every LLM-read field is absent from it. Flagged here so the warehouse and
+    # `rfp-cdc detect` can skip it; a v1 row lacks the key and is read as live.
+    dry_run: bool = False
+
     ledger_version: int = LEDGER_VERSION
 
     @property
@@ -184,6 +211,8 @@ class ExtractionLedger:
         document_role: str,
         exc: BaseException,
         stored_path: str | None = None,
+        dry_run: bool = False,
+        normalized_hash_version: int | None = None,
     ) -> ExtractionOutcome:
         """Turn a crash into a row.
 
@@ -191,6 +220,10 @@ class ExtractionLedger:
         wraps in try/except and routes here — that is what makes a traceback a
         recorded fact rather than a gap in the ledger. The exception class is
         stored separately from its message so failures are groupable.
+
+        A failed row carries no normalized hash (nothing was read), but it still
+        records the hash version and the dry-run flag, so a v2 row is v2 in every
+        column regardless of how the document ended.
         """
         outcome = ExtractionOutcome(
             run_id=run_id,
@@ -202,6 +235,8 @@ class ExtractionLedger:
             stored_path=stored_path,
             error_class=f"{type(exc).__module__}.{type(exc).__qualname__}",
             error_detail=str(exc)[:2000],
+            normalized_hash_version=normalized_hash_version,
+            dry_run=dry_run,
         )
         self.record(outcome)
         return outcome
@@ -213,6 +248,29 @@ class ExtractionLedger:
 
     def read_field_misses(self, run_id: str | None = None) -> Iterator[dict]:
         yield from _read_jsonl(self.field_misses_path, run_id)
+
+    def latest_index(self, *, include_dry_run: bool = False) -> dict[tuple[str, str], dict]:
+        """Latest outcome row per (filing_id, document_role) — the mirror of
+        `Manifest.latest_index()`, on the extraction side of the seam.
+
+        "Latest" is the greatest run_id (compact-UTC stamps sort lexically; ties
+        resolve to the later line). Dry-run rows are skipped by default for the
+        same reason `int_extract_run_current` skips them: a dry run is not an
+        extraction of the document's LLM-read fields, so it cannot stand as the
+        document's current extraction. A v1 row lacks the `dry_run` key and is
+        read as live (ADR 0017 — every v1 run that is current on the real corpus
+        is a live run). Failed rows are kept: a failure IS the latest outcome, and
+        hiding it would make "last attempt crashed" look like "never attempted".
+        """
+        index: dict[tuple[str, str], dict] = {}
+        for row in self.read_outcomes():
+            if not include_dry_run and row.get("dry_run"):
+                continue
+            key = (row["filing_id"], row["document_role"])
+            current = index.get(key)
+            if current is None or row.get("run_id", "") >= current.get("run_id", ""):
+                index[key] = row
+        return index
 
     # -- the gate ------------------------------------------------------------
 

@@ -19,11 +19,25 @@
 --
 -- The warehouse ATTRIBUTES these verdicts; it never re-evaluates the rules that
 -- produced them (that line is ADR 0008 §4's phase boundary, carried forward).
+--
+-- Phase 5 (ADR 0019) adds one filter to step 1: the run must be FULL-CORPUS. A
+-- `--filing` validate run writes results too, and if it were ever selected here every
+-- other filing's findings would vanish from the warehouse — a zero-finding filing
+-- leaves no trace, so nothing downstream could tell. The v1 read rule is stated, not
+-- coalesced: a v1 results row lacks `scope` (has_scope false) and is read as corpus,
+-- because every v1 complete run on the real store was full-corpus (5 runs, 19
+-- filings each, verified when the rule was written).
+--
+-- Resolution rows (Phase 5) copy the finding's original extract_run_id, so within the
+-- selected run they occupy their own partition below and survive as `resolved`; every
+-- consumer's reprocess_status = 'open' filter excludes them — warehouse state identical
+-- to before, and the log now says "this was a problem and was cleared, when".
 
 with latest_complete_run as (
 
     select max(run_id) as run_id
     from {{ ref('stg_dq_results') }}
+    where not has_scope or scope = 'corpus'
 
 ),
 

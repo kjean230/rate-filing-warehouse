@@ -186,7 +186,12 @@ models:
       - name: expected
         description: TEXT — heterogeneous by rule.
       - name: reprocess_status
-        description: open until a later resolution row clears it; never edited in place.
+        description: >
+          open until a later resolution row clears it; never edited in place. The
+          vocabulary is pinned (ADR 0019): open | resolved.
+        data_tests:
+          - accepted_values:
+              values: ['open', 'resolved']
 
   - name: stg_dq_results
     description: >
@@ -208,6 +213,19 @@ models:
         description: A precondition was absent (e.g. carrier states no range).
       - name: adopted
         description: Findings adopted from Phase 2, never evaluated by this layer.
+      - name: resolved
+        description: >
+          Resolution rows this run appended for the rule (ADR 0019) — counted apart
+          from the verdict identity, inside the store reconciliation. NULL on v1 rows.
+      - name: scope
+        description: >
+          corpus | filing. Only corpus runs may become the warehouse's current run
+          (int_quarantine_current). NULL on v1 rows, which are read as corpus.
+        data_tests:
+          - accepted_values:
+              values: ['corpus', 'filing']
+      - name: has_scope
+        description: jsonb key existence — false on a v1 row.
       - name: states
         description: jsonb list of states the rule saw this run.
 
@@ -237,6 +255,26 @@ models:
         description: Per-document field accounting; targeted = populated + missed.
       - name: llm_call_ids
         description: jsonb list joining to stg_llm_calls.call_id.
+      - name: normalized_field_hash
+        description: >
+          Signal 3 (ledger v2, ADR 0017): sha256 over the document's SOURCE-determined
+          extracted fields, canonicalized. NULL with normalized_field_count 0 means
+          undefined (no such field), never "unchanged". Comparable only at equal
+          normalized_hash_version.
+      - name: normalized_hash_version
+        description: Version of the field set + canonical form the hash was computed under.
+      - name: normalized_field_count
+        description: How many (row, field) pairs entered the hash; 0 explains a NULL hash.
+      - name: has_normalized_hash
+        description: jsonb key existence — false on a v1 row (column absent), true on v2.
+      - name: dry_run
+        description: >
+          TRUE when the run skipped the API; such a run is never a filing's current
+          extraction (int_extract_run_current). NULL on v1 rows, read as live.
+      - name: has_dry_run_flag
+        description: jsonb key existence — false on a v1 row.
+      - name: ledger_version
+        description: 1 or 2; v2 rows carry the hash and dry-run keys (ADR 0017).
 
   - name: stg_llm_calls
     description: >

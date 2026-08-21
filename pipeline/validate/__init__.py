@@ -37,4 +37,9 @@ from __future__ import annotations
 
 __all__ = ["DQ_SCHEMA_VERSION"]
 
-DQ_SCHEMA_VERSION = 1
+# v2 (Phase 5, ADR 0019) added `resolved` and `scope` to DqResult and stamped
+# resolution rows with the new version. v1 rows stay v1 on disk and are read by the
+# stated rule: a v1 results row LACKS `scope` and is read as `corpus` — every v1
+# complete run on the real store was full-corpus (5 runs, 19 filings each, verified
+# when the rule was written).
+DQ_SCHEMA_VERSION = 2

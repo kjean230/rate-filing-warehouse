@@ -94,7 +94,21 @@ def cell_error_outcome(rule: Rule, subject: Subject) -> Outcome | None:
 
 
 def check_present(rule: Rule, subject: Subject, bundle: FilingBundle) -> Outcome:
+    """A field is populated — optionally only once the FILING states a gate field.
+
+    `when_filing_field` (Phase 5, ADR 0018) exists for the approved measure:
+    `approved_rate_change_pct` is expected on a plan row only after the filing
+    row's `avg_rate_change_approved` is non-null (the final order landed). Before
+    that, 649 plan rows have no approved value and that is not a finding — firing
+    a warn on every one would train the exit code to be ignored (ADR 0009 §7).
+    A gate value that is absent (or an unusable CellError) reads as "not stated".
+    """
     name = rule.params["field"]
+    gate = rule.params.get("when_filing_field")
+    if gate and _from_any_filing_row(bundle, str(gate)) is None:
+        return _skip(
+            f"{gate} is not stated on the filing row, so {name} is not expected yet"
+        )
     value = subject.get(name)
     if value is None or value == "":
         return _bad(f"{name} is not populated", None, "a value")

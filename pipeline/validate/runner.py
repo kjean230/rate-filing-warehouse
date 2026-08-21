@@ -19,6 +19,14 @@ values at extraction time and they never reach `data/extracted/`. Reporting
 `PA_PLAN_RATE_IN_STATED_RANGE` as "0 violations" without them would be true and
 misleading; reporting them as violations this layer found would be false.
 `evaluated: 0 live, 54 adopted` is the accurate shape.
+
+**Pass 3 — resolve (Phase 5, ADR 0019; the step ADR 0009 §6 promised).** After a
+FULL-CORPUS run, every finding that was open at the end of the prior full-corpus
+run and was not found again this run gets a `resolved` row appended under this
+run's id. The original stays. Identity is the finding's business identity —
+`(rule_id, filing_id, subject_key, field_name)`, never `extract_run_id`, which
+legitimately changes after a re-extract. A `--filing` run resolves nothing:
+absence from a partial run proves nothing about the rest of the corpus.
 """
 
 from __future__ import annotations
@@ -28,11 +36,15 @@ from pathlib import Path
 
 from pipeline.validate.config import DqConfig, Rule
 from pipeline.validate.quarantine import (
+    SCOPE_CORPUS,
+    SCOPES,
     DqResult,
+    FindingIdentity,
     Origin,
     QuarantineRow,
     QuarantineStore,
     Verdict,
+    finding_identity,
 )
 from pipeline.validate.rules import evaluate
 from pipeline.validate.subjects import FilingBundle, Subject
@@ -61,16 +73,32 @@ class ValidationRunner:
         store: QuarantineStore,
         run_id: str,
         extract_root: Path | None = None,
+        scope: str = SCOPE_CORPUS,
     ):
+        if scope not in SCOPES:
+            raise ValueError(f"scope must be one of {sorted(SCOPES)}, got {scope!r}")
         self.config = config
         self.store = store
         self.run_id = run_id
         self.extract_root = extract_root
+        self.scope = scope
         self.stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        # Every finding this run wrote, by business identity — what pass 3 checks
+        # the prior run's open findings against.
+        self._found: set[FindingIdentity] = set()
 
     # -- pass 1 --------------------------------------------------------------
 
-    def run(self, bundles: list[FilingBundle], field_misses: list[dict]) -> list[DqResult]:
+    def run(
+        self,
+        bundles: list[FilingBundle],
+        field_misses: list[dict],
+        *,
+        prior_run_id: str | None = None,
+    ) -> list[DqResult]:
+        """Evaluate, adopt, resolve (if a prior full-corpus run is named), then
+        write one result row per rule — in that order, so `DqResult.resolved` is
+        on the result row rather than appended after it."""
         results = {
             rule.id: DqResult(
                 run_id=self.run_id,
@@ -80,6 +108,7 @@ class ValidationRunner:
                 severity=rule.severity,
                 check=rule.check,
                 states=list(rule.states),
+                scope=self.scope,
             )
             for rule in self.config.rules
         }
@@ -97,15 +126,47 @@ class ValidationRunner:
                     verdict, message, observed, expected = evaluate(rule, subject, bundle)
                     results[rule.id].record(verdict)
                     if verdict is Verdict.VIOLATION:
-                        self.store.quarantine(
+                        self._quarantine(
                             self._row(rule, subject, bundle, message, observed, expected)
                         )
 
         self._adopt(field_misses, results)
 
+        if prior_run_id is not None:
+            self.resolve_cleared(prior_run_id, results)
+
         for result in results.values():
             self.store.record_result(result)
         return list(results.values())
+
+    def _quarantine(self, row: QuarantineRow) -> None:
+        self.store.quarantine(row)
+        self._found.add(finding_identity(row.__dict__))
+
+    # -- pass 3 --------------------------------------------------------------
+
+    def resolve_cleared(self, prior_run_id: str, results: dict[str, DqResult]) -> int:
+        """Append a `resolved` row for every prior-open finding this run did not
+        find again. Returns how many were written.
+
+        Only meaningful after a FULL-CORPUS run; the CLI never calls this for a
+        `--filing` run. The copied row keeps the finding's original
+        `extract_run_id`, so downstream it occupies its own partition and
+        supersedes nothing but itself — the warehouse state is identical to before,
+        and the log now says "this was a problem and was cleared, when".
+        """
+        if self.scope != SCOPE_CORPUS:
+            raise ValueError("resolutions are computed only after a full-corpus run")
+        written = 0
+        for identity, record in self.store.open_findings(prior_run_id).items():
+            if identity in self._found:
+                continue
+            original = QuarantineRow.from_record(record)
+            self.store.resolve(original, status="resolved", run_id=self.run_id, at=self.stamp)
+            if original.rule_id in results:
+                results[original.rule_id].resolved += 1
+            written += 1
+        return written
 
     def _row(
         self,
@@ -175,7 +236,7 @@ class ValidationRunner:
             rule = self.config.by_id(rule_id)
             state = miss["filing_id"].split("-", 1)[0].upper()
             results[rule_id].adopted += 1
-            self.store.quarantine(
+            self._quarantine(
                 QuarantineRow(
                     run_id=self.run_id,
                     quarantined_at=self.stamp,

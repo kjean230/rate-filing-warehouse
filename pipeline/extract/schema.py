@@ -12,11 +12,14 @@ grains (docs/source-recon.md §4):
                          structured dataset answers (§5).
 
 Every extracted value carries provenance naming HOW it was obtained and WHERE.
-That is not decoration. Phase 3 validates an Oregon rate change three ways and has
-to be able to say *which source disagreed and at which cell or page* — not merely
-that two numbers differ. `_require_provenance` makes an unprovenanced value a hard
-failure, the same way ADR 0003 made a manifest field missing from FIELD_ORDER a
-hard failure rather than a silent drop.
+That is not decoration. Phase 3 has to be able to say *which source and which cell
+or page* a value came from — Oregon's filing-grain cross-source check and every
+quarantine row depend on it (there is no Oregon plan-grain cross-source check; the
+rate request PDF states base-rate change, not URRT field 1.11 — ADR 0008), and Phase
+5's normalized-field hash uses the provenance METHOD to include only source-determined
+fields (ADR 0017). `_require_provenance` makes an unprovenanced value a hard failure,
+the same way ADR 0003 made a manifest field missing from FIELD_ORDER a hard failure
+rather than a silent drop.
 
 Numbers are Decimal, never float. Rate changes are stored as the URRT stores
 them — a fraction, 0.1152 for 11.52% — so no unit conversion happens between the

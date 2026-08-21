@@ -21,6 +21,11 @@ trivially satisfiable by a layer that quietly does nothing.
      has none. ADR 0006 made provenance mandatory; this is where that is spent.
   6. Every field miss for the run is present in the store. Phase 2's findings must
      not be lost by the layer that claims to name them.
+  7. (Phase 5, ADR 0019) Zero silent resolutions: every finding that was open at
+     the end of the prior full-corpus run is either found again this run or
+     RESOLVED this run by an appended row. A finding that vanishes with neither is
+     this phase's analogue of a silent drop (ADR 0009 §6). Asserted only when a
+     prior full-corpus run exists.
 
 Assertion 3 is the one worth dwelling on. Without it, deleting a rule's scope — or
 mistyping a state code — produces a run that passes with fewer checks than it
@@ -31,7 +36,11 @@ the shape of a clean validation over data nobody looked at.
 from __future__ import annotations
 
 from pipeline.validate.config import DqConfig
-from pipeline.validate.quarantine import DqGateViolation, QuarantineStore
+from pipeline.validate.quarantine import (
+    DqGateViolation,
+    QuarantineStore,
+    finding_identity,
+)
 
 _COUNTERS = ("passed", "violated", "inapplicable", "not_evaluated")
 
@@ -42,8 +51,10 @@ def assert_dq_gate(
     *,
     run_id: str,
     field_miss_count: int,
+    prior_run_id: str | None = None,
 ) -> None:
-    """Raise DqGateViolation unless all six assertions hold for this run."""
+    """Raise DqGateViolation unless all assertions hold for this run (seven when a
+    prior full-corpus run is named, six otherwise)."""
     quarantine = list(store.read_quarantine(run_id))
     results = list(store.read_results(run_id))
 
@@ -105,13 +116,18 @@ def assert_dq_gate(
                 f"— {evaluated - parts} verdict(s) vanished between the predicate and "
                 f"the counter"
             )
-        expected = result.get("violated", 0) + result.get("adopted", 0)
+        # A resolution row is a row in the store for the rule, counted apart from
+        # verdicts (it is not an evaluation) but inside the reconciliation (it is
+        # a row). A v1 result row lacks `resolved`; read as 0.
+        expected = (
+            result.get("violated", 0) + result.get("adopted", 0) + result.get("resolved", 0)
+        )
         actual = quarantined_per_rule.get(rule_id, 0)
         if expected != actual:
             raise DqGateViolation(
-                f"{rule_id}: results claim {result.get('violated', 0)} violation(s) "
-                f"and {result.get('adopted', 0)} adopted, but the quarantine store "
-                f"holds {actual} row(s) for it"
+                f"{rule_id}: results claim {result.get('violated', 0)} violation(s), "
+                f"{result.get('adopted', 0)} adopted and {result.get('resolved', 0)} "
+                f"resolved, but the quarantine store holds {actual} row(s) for it"
             )
 
     # 5. Provenance, or a stated reason for its absence.
@@ -124,13 +140,53 @@ def assert_dq_gate(
                 f"or page behind it; a blank here spends that for nothing."
             )
 
-    # 6. Phase 2's findings all landed.
-    adopted = sum(1 for row in quarantine if row.get("origin") == "adopted")
+    # 6. Phase 2's findings all landed. (Resolution rows copy `origin`, so only
+    #    OPEN rows count as this run's adoptions.)
+    adopted = sum(
+        1
+        for row in quarantine
+        if row.get("origin") == "adopted" and row.get("reprocess_status", "open") == "open"
+    )
     if adopted != field_miss_count:
         raise DqGateViolation(
             f"run {run_id}: field_misses.jsonl holds {field_miss_count} row(s) for this "
             f"extract but {adopted} were adopted into the quarantine store. Phase 2's "
             f"findings must not be lost by the layer that claims to name them."
+        )
+
+    # 7. Zero silent resolutions.
+    if prior_run_id is not None:
+        assert_no_silent_resolutions(store, run_id=run_id, prior_run_id=prior_run_id)
+
+
+def assert_no_silent_resolutions(
+    store: QuarantineStore, *, run_id: str, prior_run_id: str
+) -> None:
+    """Every finding open at the end of `prior_run_id` is either re-found in
+    `run_id` (an open row with the same business identity) or resolved in `run_id`
+    (a resolved row with it). Anything else vanished silently — exit 3.
+
+    Identity is `(rule_id, filing_id, subject_key, field_name)`, never
+    `extract_run_id` (which changes after a re-extract while the finding does not).
+    """
+    prior_open = store.open_findings(prior_run_id)
+    if not prior_open:
+        return
+    seen_this_run: dict[tuple[str, str, str, str], set[str]] = {}
+    for row in store.read_quarantine(run_id):
+        seen_this_run.setdefault(finding_identity(row), set()).add(
+            row.get("reprocess_status", "open")
+        )
+    vanished = [
+        identity for identity in prior_open if not seen_this_run.get(identity)
+    ]
+    if vanished:
+        sample = ", ".join("/".join(part or "-" for part in i) for i in sorted(vanished)[:5])
+        raise DqGateViolation(
+            f"run {run_id}: {len(vanished)} finding(s) open at the end of run {prior_run_id} "
+            f"were neither found again nor resolved in this run — e.g. {sample}. A finding "
+            f"that vanishes with no resolution row is this phase's silent drop (ADR 0009 §6); "
+            f"a full-corpus run must append a `resolved` row for each one it cleared."
         )
 
 
@@ -155,4 +211,4 @@ def assert_reasons_are_mapped(config: DqConfig, field_misses: list[dict]) -> Non
         )
 
 
-__all__ = ["assert_dq_gate", "assert_reasons_are_mapped"]
+__all__ = ["assert_dq_gate", "assert_no_silent_resolutions", "assert_reasons_are_mapped"]

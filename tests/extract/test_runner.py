@@ -210,6 +210,68 @@ def test_superseded_roles_are_skipped_with_a_reason(
 
 
 # ---------------------------------------------------------------------------
+# Ledger v2: every outcome row measures signal 3 and states whether it was a dry run
+# ---------------------------------------------------------------------------
+
+
+def test_a_workbook_run_writes_a_normalized_field_hash(config, data_root, output_root):
+    stage(data_root, "or-2027-indv-good", "urrt", "urrt.xlsm", lambda p: make_urrt(p))
+    runner, ledger = build_runner(config, data_root, output_root)
+    runner.run(Manifest(data_root))
+
+    row = next(iter(ledger.read_outcomes(RUN)))
+    assert row["ledger_version"] == 2
+    assert row["normalized_field_hash"].startswith("sha256:")
+    assert row["normalized_hash_version"] == 1
+    assert row["normalized_field_count"] > 0
+    # build_runner uses a dry-run client, and the row says so — the flag mirrors
+    # the client, which is the one object that decides whether the API is called.
+    assert row["dry_run"] is True
+
+
+def test_a_skipped_role_hashes_to_none_with_count_zero(config, data_root, output_root):
+    """Null is "undefined", never "unchanged"; the count is what explains it."""
+    stage(
+        data_root, "or-2027-indv-good", "rate_tables", "rate_tables.pdf",
+        lambda p: make_pdf(p, ["Rate tables content."]),
+    )
+    runner, ledger = build_runner(config, data_root, output_root)
+    runner.run(Manifest(data_root))
+    row = next(iter(ledger.read_outcomes(RUN)))
+    assert row["status"] == OutcomeStatus.SKIPPED.value
+    assert row["normalized_field_hash"] is None
+    assert row["normalized_field_count"] == 0
+    assert row["normalized_hash_version"] == 1
+
+
+def test_two_runs_over_identical_bytes_hash_identically(config, data_root, output_root):
+    """The negative control in miniature: a re-extract of unchanged bytes is
+    extractor drift at most, never an amendment — and signal 3 says so."""
+    stage(data_root, "or-2027-indv-good", "urrt", "urrt.xlsm", lambda p: make_urrt(p))
+    first, ledger = build_runner(config, data_root, output_root, run_id=RUN)
+    first.run(Manifest(data_root))
+    second, _ = build_runner(config, data_root, output_root, run_id="20260820T190000Z")
+    second.run(Manifest(data_root))
+
+    hashes = {row["normalized_field_hash"] for row in ledger.read_outcomes()}
+    assert len(hashes) == 1 and None not in hashes
+
+
+def test_a_failed_document_still_carries_the_v2_columns(config, data_root, output_root):
+    stage(
+        data_root, "or-2027-indv-broken", "urrt", "urrt.xlsm",
+        lambda p: (p.parent.mkdir(parents=True, exist_ok=True), p.write_bytes(b"nope")),
+    )
+    runner, ledger = build_runner(config, data_root, output_root)
+    runner.run(Manifest(data_root))
+    row = next(iter(ledger.read_outcomes(RUN)))
+    assert row["status"] == OutcomeStatus.FAILED.value
+    assert row["normalized_field_hash"] is None
+    assert row["normalized_hash_version"] == 1
+    assert row["dry_run"] is True
+
+
+# ---------------------------------------------------------------------------
 # Run ids
 # ---------------------------------------------------------------------------
 

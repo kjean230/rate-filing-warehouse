@@ -45,11 +45,26 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
 
 from pipeline.validate import DQ_SCHEMA_VERSION
+
+# The business identity of a finding: what makes "the same problem" the same across
+# validate runs. extract_run_id is deliberately NOT part of it — after a re-extract
+# the run id legitimately changes while the finding is the same finding — and
+# neither is quarantined_at or run_id. This is the int_quarantine_current partition
+# minus extract_run_id, duplicated here on purpose and named in ADR 0019: the
+# resolver must decide BEFORE Postgres exists in the flow.
+FindingIdentity = tuple[str, str, str, str]
+
+# Where a validate run's subject set came from. `corpus` = every filing in the
+# extract store; `filing` = a `--filing` run, whose absence of a finding proves
+# nothing about the rest of the corpus (ADR 0019, trap T3).
+SCOPE_CORPUS = "corpus"
+SCOPE_FILING = "filing"
+SCOPES = frozenset({SCOPE_CORPUS, SCOPE_FILING})
 
 QUARANTINE_RELPATH = Path("_log") / "quarantine.jsonl"
 RESULTS_RELPATH = Path("_log") / "dq_results.jsonl"
@@ -124,13 +139,22 @@ class QuarantineRow:
 
     # `open` until a reprocess clears it. A cleared row is RESOLVED by a later
     # row, never deleted — a violation that vanishes with no resolution is this
-    # phase's analogue of a silent drop.
+    # phase's analogue of a silent drop. Vocabulary: {open, resolved} — pinned by
+    # the dbt accepted_values test and by ADR 0019.
     reprocess_status: str = "open"
 
     dq_schema_version: int = DQ_SCHEMA_VERSION
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, separators=(",", ":"))
+
+    @classmethod
+    def from_record(cls, record: dict) -> QuarantineRow:
+        """Rebuild a row from a dict read off disk, tolerating keys this version
+        does not know (a later schema) and supplying defaults for keys it lacks
+        (an earlier one). The resolver reads prior runs through this."""
+        known = {f.name for f in fields(cls)}
+        return cls(**{key: value for key, value in record.items() if key in known})
 
 
 @dataclass
@@ -159,6 +183,15 @@ class DqResult:
     not_evaluated: int = 0
     adopted: int = 0
 
+    # Resolution rows this run appended for this rule (ADR 0009 §6, exercised at
+    # Phase 5). Counted APART from the verdict identity — a resolution is not an
+    # evaluation — and part of the store reconciliation: the rule's rows in this
+    # run are violated + adopted + resolved (gate assertion 2).
+    resolved: int = 0
+
+    # `corpus` or `filing`. A v1 row lacks this key and is read as `corpus`.
+    scope: str = SCOPE_CORPUS
+
     states: list[str] = field(default_factory=list)
     dq_schema_version: int = DQ_SCHEMA_VERSION
 
@@ -168,8 +201,8 @@ class DqResult:
 
     @property
     def quarantined(self) -> int:
-        """Rows this rule should have in the store: its own plus its adopted."""
-        return self.violated + self.adopted
+        """Rows this rule should have in the store: its own, adopted, and resolved."""
+        return self.violated + self.adopted + self.resolved
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, separators=(",", ":"))
@@ -218,6 +251,9 @@ class QuarantineStore:
         """
         resolved = QuarantineRow(**{**asdict(row), "run_id": run_id, "quarantined_at": at})
         resolved.reprocess_status = status
+        # The copy is written NOW, under this version — even if the finding it
+        # clears was written under an earlier one.
+        resolved.dq_schema_version = DQ_SCHEMA_VERSION
         self.quarantine(resolved)
 
     # -- reading -------------------------------------------------------------
@@ -231,34 +267,62 @@ class QuarantineStore:
     def run_ids(self) -> set[str]:
         return {row["run_id"] for row in self.read_results() if row.get("run_id")}
 
+    def corpus_run_ids(self) -> set[str]:
+        """Complete runs that evaluated the whole corpus — the only runs a
+        resolution may be computed against, and the only runs the warehouse may
+        call current. A v1 results row lacks `scope` and is read as corpus."""
+        return {
+            row["run_id"]
+            for row in self.read_results()
+            if row.get("run_id") and row.get("scope", SCOPE_CORPUS) == SCOPE_CORPUS
+        }
+
+    def open_findings(self, run_id: str) -> dict[FindingIdentity, dict]:
+        """The run's findings that are still open at the end of it, by identity.
+
+        Last-status-wins in file order (append-only == chronological): a finding
+        followed by its own resolution row within the run is NOT open. This is
+        int_quarantine_current's rule, restated for the layer that runs before
+        Postgres exists.
+        """
+        latest: dict[FindingIdentity, dict] = {}
+        for row in self.read_quarantine(run_id):
+            latest[finding_identity(row)] = row
+        return {
+            identity: row
+            for identity, row in latest.items()
+            if row.get("reprocess_status", "open") == "open"
+        }
+
     # -- reporting -----------------------------------------------------------
 
     def summary(self, run_id: str) -> dict[str, int]:
-        totals = dict.fromkeys(
-            ("rules", "evaluated", "passed", "violated", "inapplicable",
-             "not_evaluated", "adopted"),
-            0,
-        )
+        keys = ("evaluated", "passed", "violated", "inapplicable",
+                "not_evaluated", "adopted", "resolved")
+        totals = dict.fromkeys(("rules", *keys), 0)
         for row in self.read_results(run_id):
             totals["rules"] += 1
-            for key in ("evaluated", "passed", "violated", "inapplicable",
-                        "not_evaluated", "adopted"):
+            for key in keys:
                 totals[key] += row.get(key, 0)
         return totals
 
     def exit_code(self, run_id: str) -> int:
-        """0 clean, 1 at least one `error`-severity violation. Mirrors ADR 0004.
+        """0 clean, 1 at least one OPEN `error`-severity violation. Mirrors ADR 0004.
 
         A `warn` violation does not fail the run. 417 Pennsylvania plan rows have
         no rate change and that is known, enumerated debt — reporting it as a
         failed validation run every time would train the exit code to be ignored,
         which is worse than not having one.
 
+        A RESOLVED row does not fail the run either: it copies the finding's
+        severity, but it records that the problem is gone. Counting it would make
+        the first run that clears an error finding exit 1 for clearing it.
+
         Exit 2 stays reserved for "a source denied an honest client" and is
         unreachable here, as it was in Phase 2: this layer makes no requests.
         """
         for row in self.read_quarantine(run_id):
-            if row.get("severity") == "error":
+            if row.get("severity") == "error" and row.get("reprocess_status", "open") == "open":
                 return 1
         return 0
 
@@ -283,14 +347,29 @@ def rows_by_rule(rows: Iterable[dict]) -> dict[str, int]:
     return counts
 
 
+def finding_identity(row: dict) -> FindingIdentity:
+    """(rule_id, filing_id, subject_key, field_name) — see FindingIdentity."""
+    return (
+        str(row.get("rule_id") or ""),
+        str(row.get("filing_id") or ""),
+        str(row.get("subject_key") or ""),
+        str(row.get("field_name") or ""),
+    )
+
+
 __all__ = [
     "QUARANTINE_RELPATH",
     "RESULTS_RELPATH",
+    "SCOPE_CORPUS",
+    "SCOPE_FILING",
+    "SCOPES",
     "DqGateViolation",
     "DqResult",
+    "FindingIdentity",
     "Origin",
     "QuarantineRow",
     "QuarantineStore",
     "Verdict",
+    "finding_identity",
     "rows_by_rule",
 ]

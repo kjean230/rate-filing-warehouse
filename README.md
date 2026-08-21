@@ -1,6 +1,6 @@
 # rate-filing-warehouse
 
-Dimensional warehouse for ACA individual-market rate filings from two state DOIs (PA, OR), plan year 2027 — deterministic parsing of regulatory templates plus LLM extraction of the cited justifications, both to a validated schema, with a dbt star schema and Type 2 SCD; normalized-field CDC for amended filings is planned (Phase 5).
+Dimensional warehouse for ACA individual-market rate filings from two state DOIs (PA, OR), plan year 2027 — deterministic parsing of regulatory templates plus LLM extraction of the cited justifications, both to a validated schema, with a dbt star schema, Type 2 SCD, and content-version change detection (HTTP validator / raw-byte hash / normalized-field hash) for amended filings — one amendment cycle, not continuous CDC.
 
 ## What this is, accurately
 
@@ -15,9 +15,11 @@ holds exactly one annual filing cycle). See `docs/source-recon.md` §9.
 | --- | --- |
 | 0 — Source recon | ✅ Complete, approved 2026-08-20 — `docs/source-recon.md` |
 | 1 — Raw ingest | ✅ Gate passed — see below |
-| 2 — Extraction | ✅ Gate passed (awaiting approval) — see below |
-| 3 — DQ + quarantine | ✅ Gate passed (awaiting approval) — see below |
-| 4–6 | Not started |
+| 2 — Extraction | ✅ Complete — see below |
+| 3 — DQ + quarantine | ✅ Complete — see below |
+| 4 — Warehouse | ✅ Complete, merged 2026-08-21 — see below |
+| 5 — CDC | ✅ Gate passed (awaiting approval) — see below |
+| 6 — Orchestration | Not started |
 
 ## Phase 1 — raw ingest
 
@@ -64,7 +66,8 @@ manifest row and no new directory; changed bytes get both.
 ### Tests
 
 ```bash
-pytest              # 296 offline tests, including both phase gates
+pytest              # 495 offline tests, including every phase gate
+pytest -m warehouse # 6 against the local Postgres container (POSTGRES_PORT if not 5432)
 pytest -m live      # 4 opt-in probes against the real sources (discovery only)
 ruff check .        # the only thing enforcing the declared Python 3.11 floor
 ```
@@ -187,7 +190,7 @@ a run that passes with less coverage than it claims.
 
 | | |
 | --- | --- |
-| Rules | 19, over 12 predicate families |
+| Rules | 22, over 12 predicate families — 19 live, plus three approved-measure rules added at Phase 5 that are config-only (`not_evaluated` on every row) until the September final orders |
 | Quarantined | 669 rows — 591 found here, **78 adopted** from extraction rather than rediscovered |
 | Oregon calibration identity | 55 of 66 evaluable, **0 violations**, worst relative error 1.4 × 10⁻⁵ |
 | Oregon category ⟺ zero rate | 66 / 66, both directions |
@@ -197,7 +200,7 @@ a run that passes with less coverage than it claims.
 | Metal / AV band | 1 violation — a genuine defect in a filed workbook |
 | Grounding tripwire | 302 evaluated, 53 carried a number, **0 violations**; 16 real failures arrive as adopted misses |
 
-### Only 20 of 583 Pennsylvania plan rows survive their own carrier's statement
+### Only 21 of 583 Pennsylvania plan rows survive their own carrier's statement
 
 Two rules are needed to see it, and neither alone is enough. Comparing every PA
 carrier's parsed rates against the range its own cover letter states:
@@ -213,8 +216,10 @@ carrier's parsed rates against the range its own cover letter states:
 
 `caac` is the instructive one: **20 distinct values across 36 plans passes the
 degeneracy test**, and its mean is a third of what the carrier states. Only the
-range check catches it. So the honest count is **20 Pennsylvania plan rows whose
-rate change validates against the carrier's own statement** — not 166.
+range check catches it. So the honest count is **21 Pennsylvania plan rows whose
+rate change validates against the carrier's own statement** — not 166: `gqo`'s 20
+(the only carrier whose plan-level variation validates) plus one `upmchp` row inside
+its regex-anchored stated range (n=1; ADR 0013 records the derivation).
 
 Six of those bounds are only available because the live LLM path read cover letters
 the regex anchors could not, and each is grounded in a verbatim quote
@@ -233,6 +238,97 @@ data/validated/_log/dq_results.jsonl    # one row per (run, rule) — a rule tha
 config/dq_rules.yml                     # rules, sources_at_grain, adopted_reasons
 ```
 
+## Phase 4 — warehouse
+
+Postgres in Docker, loaded by a loader with no opinions — nine `raw` tables of jsonb
+payloads, truncate-and-reload, all runs kept — and modeled in dbt: staging (typing only)
+→ intermediate (run selection, conformance, the SCD2 derivation) → marts (one fact table
+and its conforming dimensions). Disk stays the system of record; Postgres is a
+projection of it (ADR 0012).
+
+### Run
+
+```bash
+docker compose up -d
+rfp-warehouse        # load data/ into raw, then dbt build — 148 models, tests and unit tests
+```
+
+### Measured on the current corpus
+
+| | |
+| --- | --- |
+| `fct_plan_rate` | **649** rows, grain (filing, plan): **21** carrier_range_validated / **199** quarantined / **363** missing / **24** structural_zero / **42** single_source_deterministic — the vetted measure is NULL for anything known bad; the as-parsed column keeps what extraction read (ADR 0013) |
+| `dim_company` | 19 issuers × 1 version — Type 2, derived from the append-only manifest, not `dbt snapshot`; no in-window rename exists and the search is recorded (ADR 0014) |
+| `dim_filing` / `dim_plan` / `dim_justification` | 19 / 649 (grain `filing_id, plan_id_hios` — `plan_id_hios` is not corpus-unique, ADR 0013) / 302 (a multivalued dimension; the stated impacts are non-additive, ADR 0016) |
+
+**"Trust is a column" is a presentation property, not a correctness claim.** Every
+measure names its status; nothing makes the validated rows true.
+
+## Phase 5 — CDC
+
+Every extracted row is **bytes × extractor**. Bytes change when the source republishes a
+document (a new content version); rows also change when the extractor changes over the
+same bytes (the five August extract runs). Only the first is change data capture, so the
+comparison is across content versions — each represented by its latest live extraction —
+on three signals the earlier phases already record: the HTTP validator and the raw-byte
+hash (manifest), and a **normalized-field hash** over the document's source-determined
+extracted fields (extraction ledger v2). LLM-read fields are outside the hash by design:
+a change signal must be a function of the source, not of the sampler. See
+[ADR 0017](docs/decisions/0017-normalized-field-hash.md),
+[ADR 0018](docs/decisions/0018-two-axis-change-model.md),
+[ADR 0019](docs/decisions/0019-quarantine-resolution-and-scope.md) and the writeup,
+[docs/cdc-comparison.md](docs/cdc-comparison.md).
+
+### Run
+
+```bash
+rfp-cdc detect                          # classify every document's latest sighting; list stale filings
+python -m pipeline.extract --filing X   # one per stale filing (re-extraction is filing-grain)
+python -m pipeline.validate             # FULL corpus: resolves cleared findings, asserts gate 7
+rfp-warehouse                           # rebuild; the fact follows each filing's current run
+```
+
+Exit codes for `rfp-cdc detect`: `0` every document's latest live extraction is of its
+current bytes · `1` stale or unknown documents, listed · `3` a document the ledger has
+never accounted for (run a full extract; if the role is new, decide its handler first).
+It never fetches and never writes.
+
+### The gate — an amended filing updates, does not duplicate
+
+Demonstrated end to end on a labeled fixture (`tests/warehouse/test_cdc_end_to_end.py`:
+real loader, real `dbt build`, one republished document, two live extract runs plus a dry
+run, one full-corpus and one `--filing` validate run): one fact row per plan, the amended
+filing's rows on the newer run and the other filing's still on the older one, the dry
+run ignored, `int_document_versions` reading the transition on all three signals, the
+`--filing` run never current. On the real corpus it is the **baseline**: 30 documents,
+one content version each, `rfp-cdc detect` exit 0, zero resolutions.
+
+**"An amended filing updates, does not duplicate" is a convergence property** — store
+and warehouse converge to one current representation per filing across retrievals, with
+history kept. It is not completeness (signal 3 covers source-determined fields only), not
+signal agreement (their disagreement is the writeup), not continuous CDC (one real
+amendment cycle — September), and **no MERGE exists**: the fact is rebuilt from disk.
+
+### Measured — August 2026 baseline
+
+| | |
+| --- | --- |
+| Ingest re-checks (4 runs × 30 documents) | 30 first_sight / 60 unchanged_by_validator (304) / 30 unchanged_by_bytes (`--force-fetch`: validator and raw hash agreed on every document) / **0 changed** |
+| Content versions | 30 documents × 1 version; 0 transitions — the raw-byte false-positive prediction is the design's premise, not yet a measurement |
+| Resolutions | 0 — the first DQ v2 run re-found all 669 findings of the prior run; gate assertion 7 passed |
+| The approved measure | columns and rules exist; `approved_rate_change_status` = missing × 649 — **"requested vs approved" is not answered until approved values are extracted** (September, observation-first) |
+
+### Layout
+
+```
+pipeline/cdc/                                   # normalize (signal 3), detect, cli
+data/extracted/_log/extraction_outcomes.jsonl   # ledger v2: normalized_field_hash, dry_run
+data/validated/_log/quarantine.jsonl            # resolution rows beside the findings they clear
+dbt/models/intermediate/int_document_versions.sql
+dbt/analyses/cdc_*.sql                          # the three-way tables and the drift negative control
+docs/cdc-comparison.md                          # the writeup
+```
+
 ## Decisions
 
 | ADR | Subject |
@@ -248,6 +344,14 @@ config/dq_rules.yml                     # rules, sources_at_grain, adopted_reaso
 | [0009](docs/decisions/0009-quarantine-store.md) | The quarantine store: mark don't move, summarize don't enumerate |
 | [0010](docs/decisions/0010-reprocess-scope.md) | Reprocess from extracted rows and raw bytes, never from source |
 | [0011](docs/decisions/0011-manifest-schema-v2.md) | Manifest schema v2 — Oregon's posted average rate change |
+| [0012](docs/decisions/0012-warehouse-architecture.md) | A loader with no opinions, raw jsonb, Postgres as a projection |
+| [0013](docs/decisions/0013-fact-design.md) | `fct_plan_rate`: what a row means when only 21 of 583 PA rate changes validate |
+| [0014](docs/decisions/0014-dim-company-scd2.md) | `dim_company` SCD2 derived from the manifest; the rename search, recorded |
+| [0015](docs/decisions/0015-filing-crosswalk.md) | `int_filing_crosswalk` and the frozen federal seed; 15-vs-14 resolved |
+| [0016](docs/decisions/0016-justifications-dimension.md) | Justifications are a multivalued dimension, not a fact |
+| [0017](docs/decisions/0017-normalized-field-hash.md) | The normalized-field hash: source-determined fields, on the ledger, versioned; `dry_run` |
+| [0018](docs/decisions/0018-two-axis-change-model.md) | Bytes × extractor; three signals; `int_document_versions`; convergence, not MERGE; the approved measure |
+| [0019](docs/decisions/0019-quarantine-resolution-and-scope.md) | Resolution rows, business identity, `scope`, gate assertion 7 |
 
 ## Legal posture
 

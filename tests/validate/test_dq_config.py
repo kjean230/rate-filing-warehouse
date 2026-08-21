@@ -385,8 +385,25 @@ def test_sharepoint_list_is_exempt_from_the_manifest_role_check(config):
 
 
 def test_the_shipped_rules_load(config):
-    assert len(config.rules) >= 15
+    assert len(config.rules) == 22  # 19 at Phase 3 + the three approved-measure rules
     assert config.path == RULES_PATH
+
+
+def test_the_approved_measure_rules_are_configured_and_policy_bound(config):
+    """Phase 5 (ADR 0018): config-only until the September final orders, and bound
+    to a CellError policy from day one because both fields are MaybeDecimal."""
+    ids = {
+        "PLAN_APPROVED_RATE_WITHIN_PLAUSIBLE_BOUNDS",
+        "PLAN_APPROVED_RATE_PRESENT_WHEN_FILING_FINAL",
+        "PA_PLAN_APPROVED_RATE_NOT_DEGENERATE",
+    }
+    assert ids <= config.rule_ids
+    assert {"approved_rate_change_pct", "avg_rate_change_approved"} <= config.cell_error_fields
+    for rule_id in ids:
+        assert config.by_id(rule_id).on_cell_error == "not_applicable"
+    gated = config.by_id("PLAN_APPROVED_RATE_PRESENT_WHEN_FILING_FINAL")
+    assert gated.params["when_filing_field"] == "avg_rate_change_approved"
+    assert gated.severity == "warn"
 
 
 def test_every_rule_states_a_reason(config):

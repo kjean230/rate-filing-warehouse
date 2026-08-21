@@ -18,6 +18,20 @@
 -- re-running rule logic here (ADR 0008 §4's phase boundary). If the extract is newer
 -- than the last validate run, attribution would silently mark nothing — the singular
 -- test assert_quarantine_covers_fact_extract fails the build instead.
+--
+-- The APPROVED measure (Phase 5, ADR 0018) is a SECOND vetted / as-parsed / status
+-- triple, same pattern, own trust column. Nothing happens to rate_change_status when
+-- a final order lands: it is the trust status of the REQUESTED value against the
+-- carrier's own statement, and a final order does not change that claim. On the August
+-- 2026 corpus approved_rate_change_pct is structurally NULL (no extraction path
+-- produces it yet), so approved_rate_change_status is 'missing' on all 649 rows and
+-- approved_minus_requested is NULL everywhere — "requested vs approved" is NOT answered
+-- by these columns existing; it is answered when approved values are extracted.
+--
+-- Under amendment the fact UPDATES, does not duplicate, by construction: it is rebuilt
+-- from int_plans_current, which follows int_extract_run_current per filing; the prior
+-- runs' rows stay in raw/staging as history and never enter marts; plan_rate_key is
+-- unique-tested. No MERGE exists and none is needed (ADR 0012 / ADR 0018).
 
 with plans as (
 
@@ -44,6 +58,23 @@ rate_change_marks as (
         and severity = 'error'
         and reprocess_status = 'open'
         and field_name = 'cumulative_rate_change_pct'
+    group by filing_id, subject_key
+
+),
+
+-- The same, for the approved measure: open error-severity findings against
+-- approved_rate_change_pct itself (the three approved rules are config-only today).
+approved_marks as (
+
+    select
+        filing_id,
+        subject_key,
+        array_agg(distinct rule_id order by rule_id) as approved_quarantine_rule_ids
+    from {{ ref('int_quarantine_current') }}
+    where grain = 'plan'
+        and severity = 'error'
+        and reprocess_status = 'open'
+        and field_name = 'approved_rate_change_pct'
     group by filing_id, subject_key
 
 ),
@@ -113,11 +144,35 @@ with_status as (
                 then 'single_source_deterministic'
             -- Parsed, and the carrier states no range to check it against.
             else 'unvalidated_parse'
-        end as rate_change_status
+        end as rate_change_status,
+
+        ap.approved_quarantine_rule_ids,
+        -- Same first-match shape for the approved measure — with one branch fewer:
+        -- there is no carrier-stated APPROVED range anywhere in the schema, so a
+        -- 'carrier_range_validated' branch would have no input. It is added with its
+        -- input if September's republished documents state one (observation first).
+        -- Realistic statuses once values arrive: unvalidated_parse (PA), single_source_
+        -- deterministic (OR URRT cells), missing — "presented as parsed, with no
+        -- independent check", said in the column rather than implied by its absence.
+        case
+            when ap.approved_quarantine_rule_ids is not null
+                then 'quarantined'
+            when p.approved_rate_change_pct_is_cell_error
+                then 'cell_error'
+            when p.approved_rate_change_pct is null
+                then 'missing'
+            when p.plan_category in ('New', 'Terminated')
+                then 'structural_zero'
+            when p.state = 'OR'
+                then 'single_source_deterministic'
+            else 'unvalidated_parse'
+        end as approved_rate_change_status
     from plans p
     join filings f using (filing_id)
     left join rate_change_marks r
         on r.filing_id = p.filing_id and r.subject_key = p.plan_id_hios
+    left join approved_marks ap
+        on ap.filing_id = p.filing_id and ap.subject_key = p.plan_id_hios
     left join any_marks a
         on a.filing_id = p.filing_id and a.subject_key = p.plan_id_hios
 
@@ -152,9 +207,28 @@ select
     s.has_open_error_violation,
     s.open_rule_ids,
 
-    -- Phase 5's target measure: structurally null until final orders are re-ingested.
-    s.approved_rate_change_pct,
+    -- the APPROVED measure: the second vetted / as-parsed / status triple (Phase 5,
+    -- ADR 0018). Structurally NULL on the August corpus: 649 × 'missing'.
+    case
+        when s.approved_rate_change_status in ('quarantined', 'cell_error', 'missing') then null
+        else s.approved_rate_change_pct
+    end as approved_rate_change_pct,
+    s.approved_rate_change_pct as approved_rate_change_pct_as_parsed,
     s.approved_rate_change_pct_is_cell_error,
+    s.approved_rate_change_status,
+    s.approved_quarantine_rule_ids,
+
+    -- approved minus requested, at the row's own grain, from VETTED inputs only: NULL
+    -- unless both measures survived their status. A difference of two fractions (0.02 =
+    -- two percentage points) — never pre-aggregated here, because PA rows carry no
+    -- enrollment to weight by.
+    case
+        when s.approved_rate_change_status in ('quarantined', 'cell_error', 'missing')
+            then null
+        when s.rate_change_status in ('quarantined', 'cell_error', 'missing')
+            then null
+        else s.approved_rate_change_pct - s.cumulative_rate_change_pct
+    end as approved_minus_requested,
 
     -- supporting measures, each with its CellError flag (OR-only in practice;
     -- honest-NULL for all of PA — enrollment simply is not in PA's template)
