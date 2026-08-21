@@ -1,0 +1,34 @@
+# Phase 4 — the warehouse container.
+#
+# Disk stays the system of record (ADRs 0003/0006/0009); Postgres is a
+# projection that `rfp-load` rebuilds from data/ in one command, so
+# `docker compose down -v` destroys nothing that cannot be reloaded.
+#
+# The defaults below are local throwaway-container credentials, not secrets
+# (ADR 0012 will say the same): they guard a database on localhost whose entire
+# contents are reproducible from the gitignored data/ tree. Override any of
+# them in .env; a clean clone needs none of them set.
+services:
+  postgres:
+    image: postgres:16
+    container_name: rfp-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rate_filing}
+      POSTGRES_USER: ${POSTGRES_USER:-rate_filing}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rate_filing_local}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - rfp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-rate_filing} -d ${POSTGRES_DB:-rate_filing}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  rfp_pgdata:
