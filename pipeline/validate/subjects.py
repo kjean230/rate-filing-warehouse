@@ -13,10 +13,16 @@ They are complementary, not duplicates, and telling them apart by
 `source_document_role` is what makes the one cross_source rule in this project
 possible. Pennsylvania contributes exactly one.
 
-**2. The newest run directory wins, and it is chosen lexically.** Run ids are
-compact UTC (`20260820T202801Z`) precisely so that "most recent" is a string
-comparison rather than a date parse — the same property ADR 0003 gave the ingest
-store's directory segments.
+**2. The LEDGER picks the run; the newest directory is only the fallback.** Run ids
+are compact UTC (`20260820T202801Z`) so that "most recent" is a string comparison
+rather than a date parse — the same property ADR 0003 gave the ingest store's
+directory segments. But "most recent directory" is not "current extraction": a
+`--dry-run` extract writes a run directory too, with no LLM-read field in it
+(Phase 5, ADR 0017 — the trap the warehouse's `int_extract_run_current` closes by
+skipping dry runs). So the run validated here is the filing's latest LIVE run per
+the extraction ledger — the same authority the warehouse follows (ADR 0006 / 0013)
+— and only where the ledger names no run with a directory does the newest directory
+stand in (fixture stores without a ledger; a run whose every document failed).
 
 **3. A field's value and its provenance travel together.** `subject.provenance_for()`
 is what lets a quarantine row name the workbook cell or PDF page behind a bad
@@ -32,6 +38,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+from pipeline.extract.outcome import ExtractionLedger
 
 DEFAULT_EXTRACT_ROOT = Path("data") / "extracted"
 
@@ -223,7 +231,7 @@ def percent_to_fraction(value: Any) -> Decimal | None:
 
 
 def latest_run_dir(filing_dir: Path) -> Path | None:
-    """Newest run directory, chosen lexically.
+    """Newest run directory, chosen lexically — the FALLBACK, not the rule.
 
     Compact-UTC run ids sort lexically in chronological order, which is the
     property ADR 0003 gave them so that "most recent" needs no date parsing.
@@ -232,13 +240,35 @@ def latest_run_dir(filing_dir: Path) -> Path | None:
     return runs[-1] if runs else None
 
 
+def current_live_runs(extract_root: Path) -> dict[str, str]:
+    """filing_id -> the filing's latest LIVE extract run, per the ledger.
+
+    The mirror of `int_extract_run_current`: max run_id over the ledger's latest
+    non-dry-run outcome rows, per filing. Empty when no ledger exists (fixture
+    stores), in which case `load_bundles` falls back to the newest directory.
+    """
+    current: dict[str, str] = {}
+    for (filing_id, _role), row in ExtractionLedger(extract_root).latest_index().items():
+        run_id = str(row.get("run_id") or "")
+        if run_id > current.get(filing_id, ""):
+            current[filing_id] = run_id
+    return current
+
+
+def select_run_dir(filing_dir: Path, ledger_run_id: str | None) -> Path | None:
+    """The ledger's run if it has a directory here; otherwise the newest directory."""
+    if ledger_run_id and (filing_dir / ledger_run_id).is_dir():
+        return filing_dir / ledger_run_id
+    return latest_run_dir(filing_dir)
+
+
 def load_bundles(
     extract_root: Path | str = DEFAULT_EXTRACT_ROOT,
     *,
     manifest_rows: list[dict] | None = None,
     only_filing: str | None = None,
 ) -> list[FilingBundle]:
-    """Every filing in the extract store, at its most recent extraction run."""
+    """Every filing in the extract store, at its current LIVE extraction run."""
     root = Path(extract_root)
     if not root.exists():
         raise SubjectLoadError(
@@ -249,6 +279,8 @@ def load_bundles(
     for row in manifest_rows or []:
         by_filing.setdefault(row["filing_id"], []).append(row)
 
+    live_runs = current_live_runs(root)
+
     bundles: list[FilingBundle] = []
     for state_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         if state_dir.name in _NON_FILING_DIRS:
@@ -256,7 +288,7 @@ def load_bundles(
         for filing_dir in sorted(p for p in state_dir.iterdir() if p.is_dir()):
             if only_filing and filing_dir.name != only_filing:
                 continue
-            run_dir = latest_run_dir(filing_dir)
+            run_dir = select_run_dir(filing_dir, live_runs.get(filing_dir.name))
             if run_dir is None:
                 continue
             bundles.append(
@@ -356,9 +388,11 @@ __all__ = [
     "FilingBundle",
     "Subject",
     "SubjectLoadError",
+    "current_live_runs",
     "is_cell_error",
     "latest_run_dir",
     "load_bundles",
     "percent_to_fraction",
+    "select_run_dir",
     "to_decimal",
 ]

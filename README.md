@@ -315,7 +315,8 @@ amendment cycle — September), and **no MERGE exists**: the fact is rebuilt fro
 | --- | --- |
 | Ingest re-checks (4 runs × 30 documents) | 30 first_sight / 60 unchanged_by_validator (304) / 30 unchanged_by_bytes (`--force-fetch`: validator and raw hash agreed on every document) / **0 changed** |
 | Content versions | 30 documents × 1 version; 0 transitions — the raw-byte false-positive prediction is the design's premise, not yet a measurement |
-| Resolutions | 0 — the first DQ v2 run re-found all 669 findings of the prior run; gate assertion 7 passed |
+| Resolutions | 0 — the first DQ v2 run re-found all 669 findings of the prior run; gate assertion 7 passed. A live re-extract ($6.64) then resolved **2** findings — LLM justification churn, not CDC — and moved no status population |
+| Signal 3 vs the LLM path | a `--dry-run` over the same bytes hashes identically to the live run on **23 / 23** hashed documents (7 are undefined: no source-determined field) — the normalized-field hash is invariant to the LLM path, measured |
 | The approved measure | columns and rules exist; `approved_rate_change_status` = missing × 649 — **"requested vs approved" is not answered until approved values are extracted** (September, observation-first) |
 
 ### Layout

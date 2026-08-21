@@ -108,6 +108,16 @@ and `ExtractionLedger.latest_index()` skip dry-run rows: a dry run writes real o
 field, so letting it become "current" would silently empty every LLM-sourced column in the
 warehouse — which the two real dry runs could have done to the real warehouse at any time.
 
+The same trap had a sibling on the validation side, found when the first dry run after the
+ledger-v2 live run was planned: `pipeline/validate/subjects.load_bundles` chose the filing's
+**newest run directory**, and a dry run writes one. Validation would have validated the
+dry run's rows (no LLM-read field) while the warehouse, following the ledger, built from
+the live run — two definitions of "current". `load_bundles` now selects the filing's latest
+live run **per the ledger** (`current_live_runs()`, the mirror of `int_extract_run_current`)
+and falls back to the newest directory only where the ledger names no run with a directory
+(fixture stores without a ledger; a live run whose every document failed). One authority
+for "current", on both sides of the seam.
+
 **Rows written before the bump are not rewritten; they lack the keys** (ADR 0011's rule,
 third use). `stg_extraction_outcomes` exposes `has_normalized_hash` and `has_dry_run_flag` as
 jsonb key existence. The read rules are stated, not coalesced:

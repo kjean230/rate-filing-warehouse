@@ -302,7 +302,8 @@ def test_the_posted_list_value_reaches_the_bundle(config, store, extract_root):
 
 
 def test_the_newest_extraction_run_wins(config, store, extract_root):
-    """Compact-UTC run ids sort lexically, so "most recent" needs no date parse."""
+    """Compact-UTC run ids sort lexically, so "most recent" needs no date parse —
+    the FALLBACK rule, used when no extraction ledger exists (fixture stores)."""
     write_extract(
         extract_root,
         "or-2027-indv-test",
@@ -318,3 +319,49 @@ def test_the_newest_extraction_run_wins(config, store, extract_root):
     bundles = load_bundles(extract_root)
     assert bundles[0].extract_run_id == "20260821T090000Z"
     assert bundles[0].plans[0].get("metal") == "Bronze"
+
+
+def test_the_ledger_picks_the_run_and_a_dry_run_is_never_validated(config, store, extract_root):
+    """Phase 5 (ADR 0017): a `--dry-run` extract writes a newer run directory with no
+    LLM-read field in it. Validation follows the LEDGER's latest live run — the same
+    authority the warehouse's int_extract_run_current follows — not the newest dir."""
+    from pipeline.extract.outcome import ExtractionLedger, ExtractionOutcome
+
+    live, dry = EXTRACT_RUN, "20260821T090000Z"
+    write_extract(
+        extract_root, "or-2027-indv-test",
+        plans=[plan_row("39424OR1660004", metal="Gold", av_metal_value="0.625")], run_id=live,
+    )
+    write_extract(
+        extract_root, "or-2027-indv-test",
+        plans=[plan_row("39424OR1660004", metal="Bronze", av_metal_value="0.625")], run_id=dry,
+    )
+    ledger = ExtractionLedger(extract_root)
+    for run_id, is_dry in ((live, False), (dry, True)):
+        ledger.record(ExtractionOutcome(
+            run_id=run_id, filing_id="or-2027-indv-test", state="OR", document_role="urrt",
+            status="extracted", dry_run=is_dry, normalized_hash_version=1,
+        ))
+    bundles = load_bundles(extract_root)
+    assert bundles[0].extract_run_id == live
+    assert bundles[0].plans[0].get("metal") == "Gold"
+
+
+def test_a_ledger_run_without_a_directory_falls_back_to_the_newest_directory(
+    config, store, extract_root
+):
+    """A live run whose every document failed writes no outputs: validate the newest
+    directory that exists rather than nothing, and say so in the docstring."""
+    from pipeline.extract.outcome import ExtractionLedger, ExtractionOutcome
+
+    write_extract(
+        extract_root, "or-2027-indv-test",
+        plans=[plan_row("39424OR1660004", metal="Gold", av_metal_value="0.625")],
+        run_id=EXTRACT_RUN,
+    )
+    ExtractionLedger(extract_root).record(ExtractionOutcome(
+        run_id="20260821T090000Z", filing_id="or-2027-indv-test", state="OR",
+        document_role="urrt", status="failed", reason="boom", error_class="builtins.ValueError",
+        normalized_hash_version=1,
+    ))
+    assert load_bundles(extract_root)[0].extract_run_id == EXTRACT_RUN

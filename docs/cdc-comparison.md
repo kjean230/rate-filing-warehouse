@@ -4,8 +4,10 @@
 documents, 4 ingest runs). No document has been republished yet.** The September final
 orders are the real amendment cycle; until then every transition table below is a
 measured *baseline* and the raw-byte false-positive prediction is the design's *premise*.
-This file says which numbers are measured and which are predicted, and will be extended
-— not rewritten — when the first real transition lands.
+What *is* measured today, beyond the baseline: the resolution machinery on a real
+re-extract, and signal 3's invariance to the LLM path (§6). This file says which numbers
+are measured and which are predicted, and will be extended — not rewritten — when the
+first real transition lands.
 
 Design: ADRs [0017](decisions/0017-normalized-field-hash.md) (the hash),
 [0018](decisions/0018-two-axis-change-model.md) (the change model and the warehouse),
@@ -70,7 +72,7 @@ sightings; 304 rows fold into their version; failed sightings open nothing.
 | content versions | **30** — every document `content_version_seq = 1`, `is_current` |
 | sightings per version | 4 (one per ingest run) on all 30 |
 | transitions (`seq > 1`) | **0** — `dbt/analyses/cdc_version_transitions.sql` returns no rows |
-| `normalized_field_hash` on the current version | NULL on all 30 — the current extract run (`20260821T012003Z`) is ledger **v1**; `has_normalized_hash = false`, read as *unknown*, never as *unchanged* |
+| `normalized_field_hash` on the current version | NULL on all 30 at the baseline — the then-current extract run (`20260821T012003Z`) was ledger **v1**; `has_normalized_hash = false`, read as *unknown*, never as *unchanged*. After the live re-extract (§6a) the current run is v2: 23 hashed, 7 undefined |
 | `dim_filing.content_version_count` | 1 on all 19 filings; `last_content_change_at` / `last_substantive_change_at` NULL |
 
 The reading table the transitions will be read through (each cell has a dbt unit test
@@ -105,6 +107,11 @@ The first DQ-v2 full-corpus run (`20260821T221856Z`, ADR 0019):
 `--filing` runs now write `scope: filing` and can never become the warehouse's current run
 (T3); the five v1 runs read as `corpus` by the verified rule (all five covered 19 filings).
 
+Two more full-corpus runs followed the same day (§6): `20260821T225452Z` after the live
+re-extract — **2 resolutions**, both LLM-justification churn, gate 7 PASS — and
+`20260821T232503Z` after the dry run — 0 resolutions, every finding re-found, the dry run
+correctly not validated. Three DQ-v2 runs, one resolution event, zero silent vanishings.
+
 ## 5. What the fact table says today
 
 | | |
@@ -120,15 +127,59 @@ September is observation-first: the republished documents may carry approved col
 the existing documents, arrive as a new document type, or publish nothing at plan grain.
 Whichever it is, the shape is decided when it is seen, not before.
 
-## 6. Extractor-drift negative control
+## 6. Extractor-drift negative control — measured
 
 `dbt/analyses/cdc_extractor_drift_negative_control.sql`: same document, same bytes, two
-live extract runs, hashes compared. On the August corpus before any ledger-v2 run:
-**0 pairs** — the current run is v1 and carries no hash. The section below is filled by
-the first live re-extract of the unchanged corpus (approved 2026-08-21, ~$6.58), which is
-both the first measurement of the control and a rehearsal of the September flow.
+extract runs that both carry a hash, compared. Before any ledger-v2 run the answer was
+**0 pairs** (the v1 runs carry no hash). Two runs over the unchanged corpus were then made
+on 2026-08-21 to measure it — a live re-extract (approved, $6.64) and a `--dry-run`
+($0) — which together are the first measurement of the control and a rehearsal of the
+September flow on real data.
 
-_(Filled in §6a once the re-extract completes.)_
+### 6a. The live re-extract (`20260821T222316Z`) — the second axis, observed
+
+| measure | value |
+| --- | --- |
+| LLM | 38 calls, 585,085 in / 147,768 out, cache_read 24,161, **$6.6358** |
+| rows | 649 plans (unchanged), 23 filing rows, **298 justifications (was 302)**, **77 field misses (was 78)** |
+| ledger v2 | 30 outcome rows, **23 with a hash**, 7 undefined (4 `cost_containment`, 2 `rate_tables`, 1 `cost_metrics` — no source-determined field) |
+| `rfp-cdc detect` | exit 0: bytes unchanged, extraction current |
+| validate `20260821T225452Z` | 591 + 77 = 668 rows; **2 resolutions**; gate 7 PASS |
+| `fct_plan_rate` | **649 @ 21 / 199 / 363 / 24 / 42 — unchanged.** The LLM re-run moved no status population |
+| `int_document_versions` | 30 × seq 1; `normalized_field_hash` now populated on 23 (the current run is v2) |
+
+The two resolutions are the predicted churn: the adopted `JUSTIFICATION_IMPACT_GROUNDED`
+misses for `pa-2027-indv-khpe` and `pa-2027-indv-upmchp` (an LLM-stated impact that did not
+appear in its own evidence quote) were **not reproduced** by the second sampling, and
+`pa-2027-indv-ahs` gained one. That is extractor drift on the LLM axis — not an amendment,
+not CDC — and the resolution machinery (ADR 0019) recorded it as two `resolved` rows beside
+the originals rather than letting the findings vanish. The deterministic findings
+(591 live, 62 deterministic misses) were identical.
+
+### 6b. The dry run (`20260821T231804Z`) — signal 3's LLM-invariance, measured directly
+
+A `--dry-run` reads every deterministic extractor and skips the API entirely: same bytes,
+no LLM-read field anywhere. If signal 3 is a function of the source alone, its hash must
+equal the live run's on every hashed document.
+
+| pair kind | reading | pairs |
+| --- | --- | --- |
+| live–dry | **same bytes, same fields — no drift** | **23 / 23 hashed documents** (15 PA `filing_packet`, 4 OR `urrt`, 4 OR `rate_request`) |
+| live–dry | undefined on both sides (no source-determined field) | 7 (`cost_containment` × 4, `rate_tables` × 2, `cost_metrics` × 1) |
+| live–live | — | 0 — only one hashed live run exists; the first live–live pair is September's |
+
+So the hash is invariant to the LLM path on the whole corpus — 298 justifications, 131
+LLM-read filing fields, and the 2 churned findings all sit outside it — which is the
+property the design rests on, now measured rather than asserted. The dry run also
+exercised both `dry_run` guards on real data: it is the newest run directory and the newest
+ledger rows, and neither the warehouse (`int_extract_run_current` stayed on the live run;
+`assert_current_extract_run_is_live` green) nor validation (`load_bundles` follows the
+ledger; the next full run `20260821T232503Z` resolved 0 and re-found all 668) treated it
+as current.
+
+**What §6 does not measure:** live–live drift from a *parser* change (no parser changed
+between the two live runs, and the v1 runs cannot pair); and whether a *republish* moves the
+hash (§3 — nothing has republished). Both arrive with September.
 
 ## 7. What signal 3 cannot see
 
