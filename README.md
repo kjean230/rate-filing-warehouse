@@ -128,9 +128,10 @@ data/extracted/_log/field_misses.jsonl          # per-field failure log
 | --- | --- |
 | Documents accounted for | 30 / 30 |
 | Plan rows | 649 — 66 Oregon (URRT cells), 583 Pennsylvania (Rate Template) |
-| Rate changes validated | 66 OR + 166 PA; 54 more parsed and **rejected** against the carrier's stated range |
-| Field misses recorded | 62 |
-| Estimated cost per full run | ~$6 before cache savings, from ~408K located input tokens |
+| Justification rows | 302, from 38 model calls |
+| Field misses recorded | 78 — 54 outside stated range, 16 ungrounded, 4 anchor not found, 4 cell error |
+| **Measured cost, full live run** | **$6.58** — 585,085 input / 145,614 output tokens, 38 calls, all `end_turn` |
+| Prefix cache | 24,161 tokens = **4.0% of input**. Only the system prompt caches; document excerpts differ every call, so caching is not a material discount here. |
 
 Section targeting is what makes that cost possible: Moda's rate request alone extracts to
 ~1.1M tokens and **does not fit in the context window**, so whole-document extraction is
@@ -187,18 +188,37 @@ a run that passes with less coverage than it claims.
 | | |
 | --- | --- |
 | Rules | 19, over 12 predicate families |
-| Quarantined | 607 rows — 545 found here, **62 adopted** from extraction rather than rediscovered |
+| Quarantined | 669 rows — 591 found here, **78 adopted** from extraction rather than rediscovered |
 | Oregon calibration identity | 55 of 66 evaluable, **0 violations**, worst relative error 1.4 × 10⁻⁵ |
 | Oregon category ⟺ zero rate | 66 / 66, both directions |
-| **PA rates that are degenerate** | **108** — `ah` (16 × 11.30%), `ahs` (24 × 13.10%), `upmchn` (68 × 10.90%) |
+| PA rates outside the carrier's own stated range | **53** live + 54 adopted |
+| PA rates that are degenerate | **108** — `ah` (16 × 11.30%), `ahs` (24 × 13.10%), `upmchn` (68 × 10.90%) |
 | PA rows with no rate at all | 417, across 8 carriers (`warn`) |
 | Metal / AV band | 1 violation — a genuine defect in a filed workbook |
+| Grounding tripwire | 302 evaluated, 53 carried a number, **0 violations**; 16 real failures arrive as adopted misses |
 
-**The degeneracy rule is the one check that finds something nothing else can.** An
-identical rate on every plan in a filing is the signature of a filing-level average
-lifted from a summary row — the `ghp` failure (54 plans at 2.00%), which was caught
-only because that carrier states a range. So the honest count is **56 Pennsylvania
-plan rows carrying a plausibly plan-varying rate change, not 166.**
+### Only 20 of 583 Pennsylvania plan rows survive their own carrier's statement
+
+Two rules are needed to see it, and neither alone is enough. Comparing every PA
+carrier's parsed rates against the range its own cover letter states:
+
+| Carrier | plans | with a rate | distinct | parsed mean | carrier states | verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gqo` | 20 | 20 | 5 | 0.1226 | 0.1130–0.1440, avg 0.130 | **inside — the only clean one** |
+| `caac` | 36 | 36 | **20** | 0.0604 | 0.1110–0.2770, avg 0.183 | all 36 outside |
+| `ah` | 16 | 16 | 1 | 0.1130 | 0.1960–0.6910 | all 16 outside, and degenerate |
+| `khpc` | 1 | 1 | 1 | 0.0810 | 0.3310–0.3720 | outside |
+| `upmchn` | 116 | 68 | 1 | 0.1090 | −0.0107–0.2272 | inside, but degenerate |
+| 8 others | 454 | 0 | — | — | — | nothing parsed |
+
+`caac` is the instructive one: **20 distinct values across 36 plans passes the
+degeneracy test**, and its mean is a third of what the carrier states. Only the
+range check catches it. So the honest count is **20 Pennsylvania plan rows whose
+rate change validates against the carrier's own statement** — not 166.
+
+Six of those bounds are only available because the live LLM path read cover letters
+the regex anchors could not, and each is grounded in a verbatim quote
+(`caac`: *"• Range of Requested Rate Change: 11.1% to 27.7%"*).
 
 **"Every violation names a rule" is an attribution property, not a correctness
 claim.** It guarantees no row is quarantined without a reason and no rule fails

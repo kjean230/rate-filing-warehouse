@@ -415,10 +415,17 @@ class ExtractionRunner:
                     )
                 )
 
-        justifications, jnotes, jcalls = self._extract_justifications(document, doc)
+        justifications, jnotes, jcalls, jmissed = self._extract_justifications(document, doc)
         result.justifications.extend(justifications)
         notes.extend(jnotes)
         call_ids.extend(jcalls)
+        # A justification dropped for an ungrounded number was a targeted
+        # `quantified_impact_pct` that did not survive. Counting the miss without
+        # counting the target breaks `targeted == populated + missed` — the same
+        # way the rejected plan rates above did, and caught the same way: by the
+        # gate refusing the run rather than by review.
+        targeted += len(jmissed)
+        missed.extend(jmissed)
 
         for miss in missed:
             self.ledger.record_miss(miss)
@@ -787,16 +794,24 @@ class ExtractionRunner:
 
     def _extract_justifications(
         self, document: ResolvedDocument, doc: PdfDocument
-    ) -> tuple[list[RateJustification], list[str], list[str]]:
+    ) -> tuple[list[RateJustification], list[str], list[str], list[FieldMiss]]:
+        """Returns `(justifications, notes, call_ids, misses)`.
+
+        The misses are RETURNED rather than recorded here, so the caller can count
+        them as well as write them. Recording directly — which this did until the
+        first live run — writes a row to `field_misses.jsonl` that no
+        `fields_missed` counter knows about, and the gate's field-accounting
+        assertion refuses the run. That is the assertion working, twice now.
+        """
         headings = self.config.sections_for(document.state, document.document_role)
         if not headings:
-            return [], [], []
+            return [], [], [], []
 
         sections, not_found = doc.locate_sections(headings)
         sections = [clamp_section(s, self.config.limits.max_window_pages) for s in sections]
         notes = [f"sections not located: {', '.join(not_found)}"] if not_found else []
         if not sections:
-            return [], notes, []
+            return [], notes, [], []
 
         excerpt = "\n\n".join(
             f"### {section.key} — {section.heading} ({section.locator})\n{doc.window(section)}"
@@ -818,14 +833,17 @@ class ExtractionRunner:
                 excerpt=excerpt,
             )
         except LlmError as exc:
-            return [], [*notes, f"justification extraction failed: {exc}"], []
+            return [], [*notes, f"justification extraction failed: {exc}"], [], []
 
         justifications: list[RateJustification] = []
+        misses: list[FieldMiss] = []
         for entry in response.data.get("justifications", []) or []:
-            built = self._build_justification(document, entry, response.call_id, sections)
+            built, miss = self._build_justification(document, entry, response.call_id, sections)
             if built is not None:
                 justifications.append(built)
-        return justifications, notes, [response.call_id]
+            if miss is not None:
+                misses.append(miss)
+        return justifications, notes, [response.call_id], misses
 
     def _build_justification(
         self,
@@ -833,7 +851,12 @@ class ExtractionRunner:
         entry: dict[str, Any],
         call_id: str,
         sections: list[Any],
-    ) -> RateJustification | None:
+    ) -> tuple[RateJustification | None, FieldMiss | None]:
+        """Returns `(justification, miss)`. Exactly one is non-None, or both are None.
+
+        A `miss` is returned rather than recorded so the caller can count it — see
+        `_extract_justifications`.
+        """
         try:
             category = DriverCategory(entry.get("driver_category", "other"))
         except ValueError:
@@ -843,7 +866,7 @@ class ExtractionRunner:
         narrative = (entry.get("narrative") or "").strip()
         label = (entry.get("driver_label") or category.value).strip()
         if not quote or not narrative:
-            return None
+            return None, None
 
         impact = _to_decimal(entry.get("quantified_impact_pct"))
         if impact is not None:
@@ -864,39 +887,41 @@ class ExtractionRunner:
             )
 
         try:
-            return RateJustification(
-                filing_id=document.filing_id,
-                state=document.state,
-                plan_year=document.plan_year,
-                run_id=self.run_id,
-                driver_category=category,
-                driver_label=label,
-                narrative=narrative,
-                quantified_impact_pct=impact,
-                direction=_coerce_direction(entry.get("direction")),
-                source_document_role=document.document_role,
-                source_page_start=(section.page_start + 1) if section else None,
-                source_page_end=(section.page_end + 1) if section else None,
-                evidence_quote=quote,
-                confidence=_to_decimal(entry.get("confidence")),
-                provenance=provenance,
+            return (
+                RateJustification(
+                    filing_id=document.filing_id,
+                    state=document.state,
+                    plan_year=document.plan_year,
+                    run_id=self.run_id,
+                    driver_category=category,
+                    driver_label=label,
+                    narrative=narrative,
+                    quantified_impact_pct=impact,
+                    direction=_coerce_direction(entry.get("direction")),
+                    source_document_role=document.document_role,
+                    source_page_start=(section.page_start + 1) if section else None,
+                    source_page_end=(section.page_end + 1) if section else None,
+                    evidence_quote=quote,
+                    confidence=_to_decimal(entry.get("confidence")),
+                    provenance=provenance,
+                ),
+                None,
             )
         except ValueError:
             # Most often the grounding validator: a stated impact that does not
             # appear in its own evidence quote. Dropping the entry is correct —
-            # but it is dropped LOUDLY, as a field miss recorded by the caller.
-            self.ledger.record_miss(
-                FieldMiss(
-                    run_id=self.run_id,
-                    filing_id=document.filing_id,
-                    document_role=document.document_role,
-                    model_name="RateJustification",
-                    field_name="quantified_impact_pct",
-                    reason="ungrounded_in_evidence",
-                    detail=f"{label}: stated impact not present in its own evidence quote",
-                )
+            # but it is dropped LOUDLY, as a field miss the CALLER records and
+            # counts. Recording it here instead wrote a row nothing counted, which
+            # is what failed the gate on the first live run.
+            return None, FieldMiss(
+                run_id=self.run_id,
+                filing_id=document.filing_id,
+                document_role=document.document_role,
+                model_name="RateJustification",
+                field_name="quantified_impact_pct",
+                reason="ungrounded_in_evidence",
+                detail=f"{label}: stated impact not present in its own evidence quote",
             )
-            return None
 
     # -- helpers -------------------------------------------------------------
 

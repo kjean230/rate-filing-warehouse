@@ -148,10 +148,32 @@ This is the `ghp` failure exactly — 54 plans at 2.00% — which was caught **o
 because that carrier states a range, and 7 of 15 do not. `ah`, `ahs` and `upmchn`
 were caught by nothing.
 
-**The honest count is 56 Pennsylvania plan rows carrying a plausibly plan-varying
-rate change, not 166.** Every row in a degenerate group is quarantined rather than
-one representative, because there is no way to tell which identical value, if any,
-is real.
+Every row in a degenerate group is quarantined rather than one representative,
+because there is no way to tell which identical value, if any, is real.
+
+### 8. The live run made it worse, and the two rules together are what show it
+
+Degeneracy alone suggested "56 plan-varying rows, not 166". **That was still too
+generous, and only the first live LLM run could reveal it.** The model read cover
+letters the regex anchors could not, supplying a carrier-stated range for six more
+filings — each grounded in a verbatim quote. Checking the parsed rates against them:
+
+| Carrier | plans | with a rate | distinct | parsed mean | carrier states | verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gqo` | 20 | 20 | 5 | 0.1226 | 0.1130–0.1440, avg 0.130 | **inside — the only clean one** |
+| `caac` | 36 | 36 | **20** | 0.0604 | 0.1110–0.2770, avg 0.183 | all 36 outside |
+| `ah` | 16 | 16 | 1 | 0.1130 | 0.1960–0.6910 | all 16 outside, and degenerate |
+| `khpc` | 1 | 1 | 1 | 0.0810 | 0.3310–0.3720 | outside |
+| `upmchn` | 116 | 68 | 1 | 0.1090 | −0.0107–0.2272 | inside, but degenerate |
+| 8 others | 454 | 0 | — | — | — | nothing parsed |
+
+**`caac` is the case that matters.** 20 distinct values across 36 plans **passes the
+degeneracy test** — it was named above as one of the two genuine carriers — and its
+mean is a third of what the carrier states. Only the range check catches it. Neither
+rule alone would have found this; the pair does.
+
+**The honest count is 20 Pennsylvania plan rows whose rate change validates against
+the carrier's own statement.** Not 166, and not 56.
 
 ## Alternatives rejected
 
@@ -167,10 +189,15 @@ land in `data/extracted/` and be quarantined afterwards, which means Phase 4 rea
 store containing values already known to be wrong.
 
 **Re-checking the schema's grounding validator as a discovery mechanism.**
-`JUSTIFICATION_IMPACT_GROUNDED` is kept, but as a **tripwire** and labelled as one —
-it is expected to pass 100% because every row on disk already passed it at
-construction. Presenting that as a strong validation result would be the exact
-inflation `CLAUDE.md` forbids.
+`JUSTIFICATION_IMPACT_GROUNDED` is kept, but as a **tripwire** and labelled as one.
+
+**Measured on the first live run and exactly as predicted: 302 justification rows
+evaluated, 53 carried a stated number, 0 violations.** That 100% pass rate is not a
+validation result — every row on disk had already passed this test at construction,
+so the rule can only fire on a row that reached disk another way. **The 16 real
+grounding failures arrive as adopted `ungrounded_in_evidence` misses**, which is
+where they were actually caught. Presenting the 53/53 as a finding would be the
+exact inflation `CLAUDE.md` forbids.
 
 **Improving the Pennsylvania parser as part of Phase 3.** Higher value than anything
 here. Rejected as scope: it is Phase-2-shaped work, and doing it inside Phase 3
@@ -199,13 +226,23 @@ What this must **not** be called:
   **filing grain in Oregon only**, over 4 filings and 3 fields
 - ❌ "a data quality framework" — `CLAUDE.md` forbids a generic framework layer;
   this is 19 rules and 12 predicate families over 3 grains in 2 states
-- ❌ "validated 649 plan rows" — 56 Pennsylvania rows carry a plausibly
-  plan-varying rate change
+- ❌ "validated 649 plan rows" — **20** Pennsylvania rows carry a rate change that
+  validates against the carrier's own statement
 
 **The PY2026 back-test matters more now, not less.** §7 shows Pennsylvania
 extraction is materially weaker than the previous phase's own summary suggested, and
 the back-test remains the only thing that would turn its accuracy from an assumption
 into a measurement. Still unexecuted; still a scope-fence decision.
+
+**The first live LLM run failed the Phase 2 gate, and that was the gate working.**
+`_build_justification` recorded an `ungrounded_in_evidence` miss straight to the
+ledger and returned None — the row reached `field_misses.jsonl` and no
+`fields_missed` counter knew about it. 18 rows unaccounted across 12 of 30
+documents. **No offline test covered it**, because `--dry-run` produces zero
+justifications, so every test exercised the empty-list path. This is the second time
+ADR 0006's field-accounting assertion has caught a real bug on its author. Fixed by
+returning the miss to the caller, which counts *and* records it; the re-run
+reconciles exactly at 78 = 78 across all 30 documents.
 
 **A real defect surfaced on the first run.** `PLAN_AV_WITHIN_METAL_BAND` quarantined
 Moda's `39424OR1660004`, filed as **Gold** with an AV of **0.625**. Its plan name is
