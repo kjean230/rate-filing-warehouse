@@ -21,6 +21,16 @@ dependencies = [
     "pypdf>=5.0",
     "pdfplumber>=0.11",
     "openpyxl>=3.1",
+    # Phase 4 — warehouse. psycopg is the loader's only DB dependency; dbt-postgres
+    # brings dbt-core. Disk stays the system of record (ADRs 0003/0006/0009);
+    # Postgres is a downstream projection loaded by pipeline/load.
+    "psycopg[binary]>=3.1",
+    # Pinned to the 1.9 line: dbt-core >=1.10 depends on an experimental-parser
+    # sdist that downloads a platform wheel from GitHub at build time — a
+    # build-time network fetch (and observed SSL failure) a clean clone must not
+    # inherit. 1.9 has native unit tests (>=1.8), which is all Phase 4 needs.
+    "dbt-core==1.9.*",
+    "dbt-postgres==1.9.*",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +43,9 @@ dev = [
 [project.scripts]
 rfp-ingest = "pipeline.ingest.cli:main"
 rfp-extract = "pipeline.extract.cli:main"
+rfp-validate = "pipeline.validate.cli:main"
+rfp-load = "pipeline.load.cli:main"
+rfp-warehouse = "pipeline.load.warehouse:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -45,8 +58,9 @@ include = ["pipeline*"]
 testpaths = ["tests"]
 markers = [
     "live: hits real external sources; deselected by default (run with -m live)",
+    "warehouse: needs the local Postgres container; deselected by default (run with -m warehouse)",
 ]
-addopts = "-m 'not live'"
+addopts = "-m 'not live and not warehouse'"
 
 [tool.ruff]
 line-length = 100

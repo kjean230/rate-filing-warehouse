@@ -1,0 +1,192 @@
+version: 2
+
+models:
+  - name: int_extract_run_current
+    description: >
+      One row per filing: the extract run the warehouse trusts, chosen from the
+      extraction LEDGER (stg_extraction_outcomes) because ADR 0006 makes the ledger the
+      authority on run coverage — an output table's own max(run_id) would silently serve
+      an older run's rows wherever the newest run produced zero rows of that shape.
+    columns:
+      - name: filing_id
+        tests: [unique, not_null]
+      - name: run_id
+        tests: [not_null]
+
+  - name: int_plans_current
+    description: Plan rows from each filing's current extract run.
+    columns:
+      - name: filing_id
+        tests: [not_null]
+      - name: plan_id_hios
+        tests: [not_null]
+
+  - name: int_filings_current
+    description: >
+      Filing rows from each filing's current extract run — still up to two rows per
+      Oregon filing (one per source document); int_filing_conformed collapses them.
+    columns:
+      - name: filing_id
+        tests: [not_null]
+
+  - name: int_justifications_current
+    description: Justification rows from each filing's current extract run.
+    columns:
+      - name: justification_key
+        tests: [unique, not_null]
+
+  - name: int_filing_conformed
+    description: >
+      One row per filing (19). Collapses Oregon's two per-document rows with per-FIELD
+      precedence — identity from the URRT row, the headline measure from the document
+      row (URRT field 1.13 is #VALUE! in all four Oregon workbooks) — and attaches the
+      posted SharePoint list value from manifest rows where the v2 column EXISTS
+      (ADR 0011: a v1 row lacks the column; it does not carry a null).
+    columns:
+      - name: filing_id
+        tests: [unique, not_null]
+      - name: hios_issuer_id
+        tests: [not_null]
+      - name: state
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['PA', 'OR']
+      - name: source_row_count
+        description: 1 (PA) or 2 (OR); anything else means the extractor changed shape.
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 1
+              max_value: 2
+
+  - name: int_filing_crosswalk
+    description: >
+      ADR 0002's deferred cost, paid (ADR 0015). filing_id to every conformed
+      identifier, spined on hios_issuer_id (19/19) — not serff (17/19). The known gaps
+      are enumerated and enforced in assert_crosswalk_known_gaps_only; sub_trk_num is
+      structurally NULL (no PY2027 PUF, ADR 0007).
+    columns:
+      - name: filing_id
+        tests: [unique, not_null]
+      - name: hios_issuer_id
+        tests: [not_null]
+
+  - name: int_company_history
+    description: >
+      Type 2 label history per issuer, derived from the append-only manifest with
+      window functions — not dbt snapshot (ADR 0014; snapshots record load time from
+      overwriting sources; the manifest records observation time and discards nothing).
+      One version per issuer on the real corpus: no in-window rename exists, and the
+      search that established that is recorded in ADR 0014.
+    columns:
+      - name: hios_issuer_id
+        tests: [not_null]
+      - name: carrier_label_raw
+        tests: [not_null]
+      - name: valid_from
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [hios_issuer_id, version_seq]
+
+  - name: int_quarantine_current
+    description: >
+      Row-level current findings: latest COMPLETE validate run (selected from
+      dq_results, which the crashed partial run never wrote), last-status-wins per
+      finding identity (ADR 0009 §6 clears by appending, never deleting). Consumers
+      aggregate to their own grain; nothing here re-evaluates a rule.
+    columns:
+      - name: rule_id
+        tests: [not_null]
+      - name: run_id
+        tests: [not_null]
+      - name: severity
+        tests:
+          - accepted_values:
+              values: ['error', 'warn']
+      - name: origin
+        tests:
+          - accepted_values:
+              values: ['evaluated', 'adopted']
+
+unit_tests:
+  - name: scd2_versions_a_label_change
+    description: >
+      THE PHASE 4 GATE DEMONSTRATION (ADR 0014). A fixture rename — labeled as a
+      fixture, because no real in-window rename exists and one must not be fabricated
+      (§8 risk 5) — must produce two versions: the first floored to the beginning of
+      time and CLOSED at the observing run's retrieved_at, the second opening at that
+      same instant and current. [valid_from, valid_to), no overlap, no gap.
+    model: int_company_history
+    given:
+      - input: ref('stg_ingest_manifest')
+        rows:
+          - {filing_id: pa-2027-indv-x, run_id: '20260801T000000Z', retrieved_at: '20260801T000005Z', carrier_label_raw: 'Old Mutual of PA', error: null}
+          - {filing_id: pa-2027-indv-x, run_id: '20260810T000000Z', retrieved_at: '20260810T000005Z', carrier_label_raw: 'Old Mutual of PA', error: null}
+          - {filing_id: pa-2027-indv-x, run_id: '20260820T000000Z', retrieved_at: '20260820T000005Z', carrier_label_raw: 'New Mutual of PA', error: null}
+      - input: ref('int_filing_crosswalk')
+        rows:
+          - {filing_id: pa-2027-indv-x, hios_issuer_id: '99999'}
+    expect:
+      rows:
+        - {hios_issuer_id: '99999', carrier_label_raw: 'Old Mutual of PA', version_seq: 1, valid_from: '00000000T000000Z', valid_to: '20260820T000005Z', is_current: false}
+        - {hios_issuer_id: '99999', carrier_label_raw: 'New Mutual of PA', version_seq: 2, valid_from: '20260820T000005Z', valid_to: null, is_current: true}
+
+  - name: scd2_failed_retrievals_do_not_open_versions
+    description: >
+      A failed manifest row (error populated) carries whatever label the adapter had;
+      it must not open or close a version. Same issuer, one good label, one failed row
+      with a different label: still one version.
+    model: int_company_history
+    given:
+      - input: ref('stg_ingest_manifest')
+        rows:
+          - {filing_id: pa-2027-indv-x, run_id: '20260801T000000Z', retrieved_at: '20260801T000005Z', carrier_label_raw: 'Steady Name', error: null}
+          - {filing_id: pa-2027-indv-x, run_id: '20260810T000000Z', retrieved_at: '20260810T000005Z', carrier_label_raw: 'Glitch Name', error: 'HTTP 500'}
+      - input: ref('int_filing_crosswalk')
+        rows:
+          - {filing_id: pa-2027-indv-x, hios_issuer_id: '99999'}
+    expect:
+      rows:
+        - {hios_issuer_id: '99999', carrier_label_raw: 'Steady Name', version_seq: 1, valid_from: '00000000T000000Z', valid_to: null, is_current: true}
+
+  - name: quarantine_latest_complete_run_and_last_status_wins
+    description: >
+      Run selection comes from dq_results (a crashed run writes quarantine rows but no
+      results and must be invisible — here run V3). Within the selected run V2, a later
+      resolution row supersedes the open row it clears (ADR 0009 §6).
+    model: int_quarantine_current
+    given:
+      - input: ref('stg_dq_results')
+        rows:
+          - {run_id: 'V1'}
+          - {run_id: 'V2'}
+      - input: ref('stg_quarantine')
+        rows:
+          - {run_id: 'V1', quarantined_at: 'T1', rule_id: R, filing_id: f, subject_key: p1, field_name: x, extract_run_id: E, reprocess_status: open, severity: error, grain: plan, source_line: 1}
+          - {run_id: 'V2', quarantined_at: 'T2', rule_id: R, filing_id: f, subject_key: p1, field_name: x, extract_run_id: E, reprocess_status: open, severity: error, grain: plan, source_line: 2}
+          - {run_id: 'V2', quarantined_at: 'T3', rule_id: R, filing_id: f, subject_key: p1, field_name: x, extract_run_id: E, reprocess_status: resolved, severity: error, grain: plan, source_line: 3}
+          - {run_id: 'V2', quarantined_at: 'T2', rule_id: R, filing_id: f, subject_key: p2, field_name: x, extract_run_id: E, reprocess_status: open, severity: error, grain: plan, source_line: 4}
+          - {run_id: 'V3', quarantined_at: 'T4', rule_id: R, filing_id: f, subject_key: p3, field_name: x, extract_run_id: E, reprocess_status: open, severity: error, grain: plan, source_line: 5}
+    expect:
+      rows:
+        - {run_id: 'V2', subject_key: p1, reprocess_status: resolved}
+        - {run_id: 'V2', subject_key: p2, reprocess_status: open}
+
+  - name: conformed_field_precedence_across_oregon_duality
+    description: >
+      Identity prefers the URRT row; the headline measure prefers the document row,
+      because the URRT side of that field is #VALUE! wherever it exists (ADR 0011). The
+      conformed CellError flag describes the CHOSEN value: false when any row supplied
+      a number, true only when every candidate was a CellError.
+    model: int_filing_conformed
+    given:
+      - input: ref('int_filings_current')
+        rows:
+          - {filing_id: or-2027-indv-x, state: OR, plan_year: 2027, market: individual, run_id: E1, source_document_role: urrt, serff_tracking_number: 'XXOR-134900000', hios_issuer_id: '11111', avg_rate_change_requested: null, avg_rate_change_requested_is_cell_error: true, avg_rate_change_approved: null, avg_rate_change_approved_is_cell_error: false}
+          - {filing_id: or-2027-indv-x, state: OR, plan_year: 2027, market: individual, run_id: E1, source_document_role: rate_request, serff_tracking_number: null, hios_issuer_id: '11111', avg_rate_change_requested: 0.1223, avg_rate_change_requested_is_cell_error: false, avg_rate_change_approved: null, avg_rate_change_approved_is_cell_error: false}
+      - input: ref('stg_ingest_manifest')
+        rows: []
+    expect:
+      rows:
+        - {filing_id: or-2027-indv-x, serff_tracking_number: 'XXOR-134900000', avg_rate_change_requested: 0.1223, avg_rate_change_requested_is_cell_error: false, source_row_count: 2}

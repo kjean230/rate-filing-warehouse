@@ -1,0 +1,262 @@
+version: 2
+
+# Staging tests are deliberately light: staging is a multi-run passthrough (every
+# run's rows are present; the intermediate layer selects), so uniqueness holds at
+# intermediate grain, not here. NO uniqueness tests at staging.
+#
+# Every *_is_cell_error boolean marks a source cell holding a spreadsheet error
+# ('#VALUE!') — distinct from NULL, which means the document did not say (ADR 0006).
+
+models:
+  - name: stg_ingest_manifest
+    description: >
+      Typed view over raw.ingest_manifest (Phase 1, ADR 0003 / ADR 0011). One row
+      per (run_id, filing_id, document_role) per run, including 304s and failures.
+    columns:
+      - name: run_id
+        description: Compact-UTC run stamp, TEXT — lexicographically ordered key.
+        data_tests:
+          - not_null
+      - name: filing_id
+        description: Carrier-slug source-local filing key (ADR 0002).
+        data_tests:
+          - not_null
+      - name: document_role
+        description: Which document of the filing this row describes.
+        data_tests:
+          - not_null
+      - name: state
+        data_tests:
+          - accepted_values:
+              values: ['PA', 'OR']
+      - name: manifest_schema_version
+        description: 1 or 2; v2 rows carry the avg_rate_request_posted key (ADR 0011).
+      - name: avg_rate_request_posted
+        description: Oregon's posted average rate request, verbatim ('11.7%'). NULL for PA.
+      - name: has_posted_avg_rate
+        description: >
+          jsonb key existence, not null-ness — false on a v1 row (column absent),
+          true on a v2 row even when the source posted nothing.
+      - name: avg_rate_request_posted_fraction
+        description: The posted percent parsed to a fraction (0.117). NULL when absent.
+      - name: sharepoint_version
+        description: Monotonic integer from Oregon's '{GUID},N' ETag. NULL for PA.
+      - name: prior_content_hash
+        description: Hash this sighting was compared against; NULL on first sight.
+      - name: unchanged
+        description: TRUE when the source returned 304/same-hash for this sighting.
+
+  - name: stg_filing_extracts
+    description: >
+      Typed view over raw.filing_extracts (Phase 2 FilingExtract). Filing grain;
+      Oregon has two rows per filing, one per producing document — see
+      source_document_role.
+    columns:
+      - name: filing_id
+        data_tests:
+          - not_null
+      - name: run_id
+        description: Extract run stamp, TEXT.
+        data_tests:
+          - not_null
+      - name: state
+        data_tests:
+          - accepted_values:
+              values: ['PA', 'OR']
+      - name: serff_tracking_number
+        description: From a labeled anchor only; populates int_filing_crosswalk (ADR 0002).
+      - name: toi_code
+        description: SERFF Type of Insurance; anything not starting H16I is out of scope.
+      - name: avg_rate_change_requested
+        description: >
+          Fraction, not percent (0.1222 for 12.22%). For PA this is the carrier
+          statement its plan rows are checked against — the state's only check.
+      - name: rate_change_min
+        description: PA cover letter stated range, lower bound. Fraction.
+      - name: rate_change_max
+        description: PA cover letter stated range, upper bound. Fraction.
+      - name: avg_rate_change_approved
+        description: NULL in every August 2026 run; non-null later IS the Phase 5 change.
+      - name: plan_count_stated
+        description: The carrier's own plan count — checked against extracted plan rows.
+      - name: source_document_role
+        description: >
+          Derived from provenance — the single document that produced this row;
+          NULL when the row carries no provenance entries.
+      - name: provenance
+        description: jsonb dict keyed by field name (FieldProvenance per entry).
+
+  - name: stg_plan_extracts
+    description: >
+      Typed view over raw.plan_extracts (Phase 2 PlanRateExtract) — the fact
+      grain. 18 MaybeDecimal measures, each with an _is_cell_error flag. No
+      market column exists at this grain; it joins in from filing context.
+    columns:
+      - name: filing_id
+        data_tests:
+          - not_null
+      - name: run_id
+        data_tests:
+          - not_null
+      - name: plan_id_hios
+        description: Standard Component ID, 5-digit issuer + state + 7 digits.
+        data_tests:
+          - not_null
+      - name: state
+        data_tests:
+          - accepted_values:
+              values: ['PA', 'OR']
+      - name: metal
+        description: Bronze/Silver/Gold/Platinum/Catastrophic (URRT field 1.5).
+      - name: plan_category
+        description: New/Renewing/Terminated (field 1.7).
+      - name: cumulative_rate_change_pct
+        description: >
+          URRT field 1.11, the headline measure, as a fraction. PA rows must fall
+          inside the filing's stated min/max range — the state's only check.
+      - name: approved_rate_change_pct
+        description: NULL until the September 2026 final orders; Phase 5 target.
+      - name: current_enrollment
+        description: Field 2.12; weights the enrollment-weighted mean check.
+      - name: provenance
+        description: jsonb dict keyed by field name (FieldProvenance per entry).
+
+  - name: stg_justifications
+    description: >
+      Typed view over raw.justification_extracts (Phase 2 RateJustification).
+      Narrative grain; no natural key, so justification_key hashes the loader
+      ordinal (filing_id, run_id, source_file, source_line).
+    columns:
+      - name: justification_key
+        description: Surrogate key from the loader ordinal; unique per landed row.
+        data_tests:
+          - not_null
+      - name: filing_id
+        data_tests:
+          - not_null
+      - name: run_id
+        data_tests:
+          - not_null
+      - name: state
+        data_tests:
+          - accepted_values:
+              values: ['PA', 'OR']
+      - name: driver_category
+        description: Conformed driver vocabulary (medical_trend, morbidity, ...).
+      - name: driver_label
+        description: The section heading as the document writes it.
+      - name: quantified_impact_pct
+        description: >
+          Fraction, only when the document states one — plain numeric, never a
+          CellError; grounded in evidence_quote by the Phase 2 validator.
+      - name: justification_ordinal
+        description: The loader's line ordinal (= source_line), the row's identity.
+
+  - name: stg_quarantine
+    description: >
+      Typed view over raw.quarantine (Phase 3). One row per violation; append-only,
+      so resolution rows appear beside the findings they clear.
+    columns:
+      - name: rule_id
+        description: The rule that failed — the Phase 3 gate, stated per row.
+        data_tests:
+          - not_null
+      - name: run_id
+        data_tests:
+          - not_null
+      - name: filing_id
+        data_tests:
+          - not_null
+      - name: state
+        data_tests:
+          - accepted_values:
+              values: ['PA', 'OR']
+      - name: origin
+        description: >
+          evaluated = found by Phase 3; adopted = found by Phase 2 and named here
+          rather than rediscovered (ADR 0008) — this is also how field_misses
+          enters the warehouse.
+        data_tests:
+          - accepted_values:
+              values: ['evaluated', 'adopted']
+      - name: subject_key
+        description: The violating subject (plan id, filing id, ...) within the filing.
+      - name: observed
+        description: TEXT — heterogeneous by rule.
+      - name: expected
+        description: TEXT — heterogeneous by rule.
+      - name: reprocess_status
+        description: open until a later resolution row clears it; never edited in place.
+
+  - name: stg_dq_results
+    description: >
+      Typed view over raw.dq_results (Phase 3). One row per (run, rule);
+      evaluated == passed + violated + inapplicable + not_evaluated, with adopted
+      counted separately.
+    columns:
+      - name: rule_id
+        data_tests:
+          - not_null
+      - name: run_id
+        data_tests:
+          - not_null
+      - name: check_name
+        description: The rule's check expression label (payload key 'check', renamed).
+      - name: inapplicable
+        description: Rule looked and declined (CellError cell, unbanded metal, ...).
+      - name: not_evaluated
+        description: A precondition was absent (e.g. carrier states no range).
+      - name: adopted
+        description: Findings adopted from Phase 2, never evaluated by this layer.
+      - name: states
+        description: jsonb list of states the rule saw this run.
+
+  - name: stg_extraction_outcomes
+    description: >
+      Typed view over raw.extraction_outcomes (Phase 2 ledger). One terminal
+      verdict per (run_id, filing_id, document_role), including skips and crashes.
+    columns:
+      - name: run_id
+        data_tests:
+          - not_null
+      - name: filing_id
+        data_tests:
+          - not_null
+      - name: document_role
+        data_tests:
+          - not_null
+      - name: state
+        data_tests:
+          - accepted_values:
+              values: ['PA', 'OR']
+      - name: status
+        description: Terminal only — extracted / partial / skipped / failed.
+      - name: reason
+        description: Required unless status = extracted.
+      - name: fields_targeted
+        description: Per-document field accounting; targeted = populated + missed.
+      - name: llm_call_ids
+        description: jsonb list joining to stg_llm_calls.call_id.
+
+  - name: stg_llm_calls
+    description: >
+      Typed view over raw.llm_calls (Phase 2 cost/token log). One row per
+      Messages API call; prices stamped at call time.
+    columns:
+      - name: call_id
+        data_tests:
+          - not_null
+      - name: run_id
+        data_tests:
+          - not_null
+      - name: filing_id
+        data_tests:
+          - not_null
+      - name: target_section
+        description: The targeted document section — what makes cost-per-section queryable.
+      - name: estimated_input_tokens
+        description: Pre-flight count_tokens result; the token-ceiling guard's input.
+      - name: cost_usd
+        description: Dollars for this call, computed at call time from stamped prices.
+      - name: prompt_sha256
+        description: Fingerprint of the cache-relevant prefix; explains cache misses.
