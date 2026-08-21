@@ -231,13 +231,13 @@ def test_a_resolved_violation_leaves_two_rows_not_zero(store):
 
     original = make_row()
     store.quarantine(original)
-    store.resolve(original, status="cleared_by_reprocess", run_id="20260821T000000Z",
+    store.resolve(original, status="resolved", run_id="20260821T000000Z",
                   at="20260821T000000Z")
 
     rows = list(store.read_quarantine())
     assert len(rows) == 2
     assert rows[0]["reprocess_status"] == "open"
-    assert rows[1]["reprocess_status"] == "cleared_by_reprocess"
+    assert rows[1]["reprocess_status"] == "resolved"
     assert rows[1]["rule_id"] == rows[0]["rule_id"]
 
 

@@ -8,8 +8,9 @@ models:
       and how far it was checked, never that the rate is correct: the vetted measure
       (rate_change_requested) is NULL for anything error-quarantined, the as-parsed
       column preserves what extraction read, and rate_change_status names which claim
-      each row supports. Only 20 of 583 PA rows validate against the carrier's own
-      statement (gqo alone); the status column is where that fact lives in SQL.
+      each row supports. 21 rows in 2 filings validate against the carrier's own
+      statement; only gqo's 20 do so with plan-level variation — the status column is
+      where that fact lives in SQL.
       Statuses ATTRIBUTE Phase 3 verdicts — nothing here re-evaluates a rule
       (ADR 0013 / ADR 0008 §4).
     columns:

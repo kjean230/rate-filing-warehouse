@@ -10,8 +10,9 @@
 -- The vetted/as-parsed pair: rate_change_requested is NULL unless trustworthy, so the
 -- default aggregation path cannot silently include caac's 36 known-wrong values or
 -- upmchn's 68 degenerate copies; the as-parsed column preserves what extraction read.
--- Only 20 of 583 PA rows validate against their carrier's own statement (gqo alone) —
--- the status column is where that fact lives in SQL rather than in a README.
+-- 21 rows in 2 filings validate against the carrier's own statement; only gqo's 20 do
+-- so with plan-level variation — the status column is where that fact lives in SQL
+-- rather than in a README.
 --
 -- Statuses are ATTRIBUTED from Phase 3's quarantine verdicts, never re-derived by
 -- re-running rule logic here (ADR 0008 §4's phase boundary). If the extract is newer
@@ -77,7 +78,9 @@ with_status as (
         a.open_rule_ids,
 
         -- First-match derivation; the populations on the current corpus are recorded
-        -- in ADR 0013 (20 / 145 / 417 / 24 / 42 / 1).
+        -- in ADR 0013 (21 carrier_range_validated / 199 quarantined / 363 missing /
+        -- 24 structural_zero / 42 single_source_deterministic; cell_error and
+        -- unvalidated_parse 0).
         case
             -- Phase 3 found the value wrong (degenerate and/or outside the carrier's
             -- stated range): known bad, measure withheld.
@@ -88,7 +91,7 @@ with_status as (
             -- not "missing" (ADR 0006) and must not be reported as it.
             when p.cumulative_rate_change_pct_is_cell_error
                 then 'cell_error'
-            -- Nothing parsed — 417 PA rows; enumerated debt, not measures.
+            -- Nothing parsed — 363 PA rows; enumerated debt, not measures.
             when p.cumulative_rate_change_pct is null
                 then 'missing'
             -- New/Terminated plans have no prior-year rate: a TRUE 0%, verified both
