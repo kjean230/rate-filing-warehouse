@@ -1,6 +1,6 @@
 # rate-filing-warehouse
 
-Dimensional warehouse for ACA individual-market rate filings from two state DOIs (PA, OR), plan year 2027 — deterministic parsing of regulatory templates plus LLM extraction of the cited justifications, both to a validated schema, with a dbt star schema, Type 2 SCD, and content-version change detection (HTTP validator / raw-byte hash / normalized-field hash) for amended filings — one amendment cycle, not continuous CDC.
+Dimensional warehouse for ACA individual-market rate filings from two state DOIs (PA, OR), plan year 2027 — deterministic parsing of regulatory templates plus LLM extraction of the cited justifications, both to a validated schema, with a dbt star schema, Type 2 SCD, and content-version change detection (HTTP validator / raw-byte hash / normalized-field hash) for amended filings — one amendment cycle, not continuous CDC — run end to end by one command (`rfp-run`), a DAG runner over six CLIs, not a platform.
 
 ## What this is, accurately
 
@@ -19,7 +19,7 @@ holds exactly one annual filing cycle). See `docs/source-recon.md` §9.
 | 3 — DQ + quarantine | ✅ Complete — see below |
 | 4 — Warehouse | ✅ Complete, merged 2026-08-21 — see below |
 | 5 — CDC | ✅ Gate passed (awaiting approval) — see below |
-| 6 — Orchestration | Not started |
+| 6 — Orchestration | ✅ Gate passed (awaiting approval) — see below |
 
 ## Phase 1 — raw ingest
 
@@ -66,8 +66,8 @@ manifest row and no new directory; changed bytes get both.
 ### Tests
 
 ```bash
-pytest              # 499 offline tests, including every phase gate
-pytest -m warehouse # 6 against the local Postgres container (POSTGRES_PORT if not 5432)
+pytest              # 589 offline tests, including every phase gate
+pytest -m warehouse # 8 against the local Postgres container (POSTGRES_PORT if not 5432)
 pytest -m live      # 4 opt-in probes against the real sources (discovery only)
 ruff check .        # the only thing enforcing the declared Python 3.11 floor
 ```
@@ -330,6 +330,90 @@ dbt/analyses/cdc_*.sql                          # the three-way tables and the d
 docs/cdc-comparison.md                          # the writeup
 ```
 
+## Phase 6 — orchestration
+
+One command runs the pipeline as a DAG — a dependency-ordered runner over the six CLIs the
+earlier phases already ship. Not a platform: no scheduler, no retries, no UI, zero new
+dependencies. Dagster, Airflow, Prefect and Make were judged against five criteria (clean
+clone + one command; no build-time network fetch against the dbt 1.9 pin; per-filing failure
+isolation over a list computed at run time; idempotent re-runs; the 0/1/2/3 exit-code
+vocabulary) and rejected: everything a framework sells is here unnecessary, forbidden, or
+already present. See [ADR 0020](docs/decisions/0020-orchestration-dag-runner.md), which also
+carries the concept map — what each piece is called in Airflow and Dagster.
+
+```
+ingest ─► detect ─┬─ exit 0 ────────────────────────────────────────────────┐
+                  ├─ exit 1 ─► extract --filing F  (per stale F, in order,   │
+                  │               continuing past any failure)               │
+                  │               └─► re-detect: no stale, no never_extracted ─┤
+                  ├─ exit 3, nothing ever extracted ─► extract (full, gate) ──┘
+                  └─ exit 3, otherwise ─► STOP — a human decides the handler
+                                                                             ▼
+                           validate (FULL corpus, unless current) ─► load ─► dbt build
+```
+
+### Run
+
+```bash
+docker compose up -d
+rfp-run              # the DAG; a clean clone: ingest → full extract (needs ANTHROPIC_API_KEY) → validate → load → dbt build
+rfp-run --offline    # skip ingest; detect reads the manifest on disk — no source is contacted
+rfp-warehouse        # the tail only: load → dbt build (after a model edit, or --reprocess extracted)
+```
+
+Run from the repository root (every CLI uses repo-relative defaults). The runner loads `.env`
+once and every child inherits it — dbt (`POSTGRES_PORT`) and the extract CLI
+(`ANTHROPIC_API_KEY`) read only the environment. The DAG never runs a dry extract (a dry run
+cannot make a stale filing current, ADR 0017) and never a `--filing` validate (never current,
+ADR 0019): both are impossible by construction in the argv builders, and tested. Nothing is
+retried at this level; a plain re-run resumes by construction (conditional GETs, detect skips
+current filings, validate skips when current, load and dbt are idempotent).
+
+Exit codes answer *"did the pipeline converge, and did every document it touched get read?"*:
+`0` converged · `1` partial or stopped — failed sightings, failed documents, a filing that did
+not become current, a node that could not run; the record says which · `2` a source denied an
+honest client: halted, nothing downstream ran, never retry · `3` a gate failed (extract's,
+validate's, detect's coverage gap, dbt's) — a bug. Validate's error-severity findings and
+extract's `partial` documents are recorded on the node rows and **do not** move the run's
+exit: on this corpus every extract run and every validate run exits 1, and propagating that
+would train the code to be ignored (ADR 0009 §7).
+
+### The gate — one bad filing fails in isolation
+
+Stated as a property and broken on purpose (`tests/orchestrate/test_isolation.py`): for stale
+filings {A, B, C} with B's extract failing — a gate code, a crash, or an exit 1 that produced no
+ledger run — A and C are still extracted, in order; the record names B; the re-detect lists
+exactly B; validate / load / dbt do not run; the run exits non-zero at the re-detect; the next
+`rfp-run` re-extracts only B and converges. The sibling test runs the fan-out with
+`continue_on_failure=False` (Airflow's default `all_success`) and shows C never extracted, so
+the suite discriminates. End to end, `tests/warehouse/test_orchestrate_end_to_end.py` runs the
+real `rfp-run --offline` over the Phase 5 fixture tree — real detect, validate skipped by
+currency, real load, real `dbt build`, the record written — twice, converging both times.
+
+**"One bad filing fails in isolation" is a sequencing / isolation property** of the driver over
+nodes that were already isolated (ADRs 0004/0006/0009/0012) — not a scheduler, not retries,
+not continuous, not a platform. A DAG over two sources and one fact table.
+
+### Measured — the one real-corpus run (offline, 2026-08-22)
+
+| | |
+| --- | --- |
+| `rfp-run --offline` over the August corpus | detect exit 0 (30 documents, all `current`) → extract and re-detect skipped → validate skipped (`20260821T232503Z` postdates the newest current extract run `20260821T222316Z`) → load 11,775 raw rows → `dbt build` **148 / 148** → **exit 0, converged**; 3 nodes run, 4 skipped with their reasons on the rows; 6.6 s |
+| The record | `data/orchestration/_log/dag_runs.jsonl` (a `running` row, then the terminal row — `detect_before` carries the decision), `dag_nodes.jsonl` (7 rows), `20260822T033830Z/{02-detect,06-load,07-dbt_build}.log` |
+| Not run | no live extract (≈$6.6 per full run), no September amendment — the fan-out and the gate are demonstrated on the labelled fixture with scripted nodes; the bootstrap path (a clean clone's first run) likewise |
+
+### Layout
+
+```
+pipeline/orchestrate/                                   # __init__ (NODES, the vocabulary), nodes, decisions, record, driver, cli
+data/orchestration/_log/dag_runs.jsonl                  # one running row + one terminal row per run; detect's decision
+data/orchestration/_log/dag_nodes.jsonl                 # one row per node execution or skip
+data/orchestration/{dag_run_id}/NN-node[-filing].log    # per-node child output; .lock = one active run
+```
+
+The record is **not** loaded into the warehouse — it answers "did the pipeline run", not the
+business question the fact table exists for (ADR 0020 decision 10).
+
 ## Decisions
 
 | ADR | Subject |
@@ -353,6 +437,7 @@ docs/cdc-comparison.md                          # the writeup
 | [0017](docs/decisions/0017-normalized-field-hash.md) | The normalized-field hash: source-determined fields, on the ledger, versioned; `dry_run` |
 | [0018](docs/decisions/0018-two-axis-change-model.md) | Bytes × extractor; three signals; `int_document_versions`; convergence, not MERGE; the approved measure |
 | [0019](docs/decisions/0019-quarantine-resolution-and-scope.md) | Resolution rows, business identity, `scope`, gate assertion 7 |
+| [0020](docs/decisions/0020-orchestration-dag-runner.md) | Orchestration: a stdlib DAG runner; Dagster / Airflow / Prefect evaluated and rejected; the re-detect gate, bootstrap, validate currency, the exit-code policy, the run record |
 
 ## Legal posture
 

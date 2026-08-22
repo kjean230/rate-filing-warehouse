@@ -238,6 +238,13 @@ the dry run's poison value never surfacing, the transition read on all three sig
 
 ## 10. September — the real exercise, in this order
 
+Since Phase 6, steps 1–5 are one command — `rfp-run` (ADR 0020): ingest → detect → one
+`--filing` extract per stale filing → re-detect → validate → load → dbt build, with the
+decision and every node's exit recorded under `data/orchestration/`. A re-extract that fails
+leaves the warehouse un-rebuilt and the run at exit 1 naming the filing; `rfp-run` again
+retries exactly that filing. The list stays as the statement of what the command does, and as
+the manual path.
+
 1. `rfp-ingest` (honest UA; a 403 halts, ADR 0004).
 2. `rfp-cdc detect` — expect `changed` rows; `stale` filings listed; exit 1. Exit 3 means
    a new document appeared: stop and decide its handler.
