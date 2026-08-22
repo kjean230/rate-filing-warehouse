@@ -226,3 +226,4 @@ data/
 # Session handoff notes. Local scratch for continuing work across sessions,
 # never committed — they capture live-run observations, not repo state.
 .claude/handoff/
+.claude/
