@@ -13,6 +13,8 @@ import pytest
 
 from pipeline.load import cli, warehouse
 from pipeline.load.loader import TABLES, LoadError, read_all
+from pipeline.orchestrate.driver import RunOptions, run_warehouse
+from pipeline.orchestrate.nodes import CommandResult
 from tests.warehouse.conftest import RUN_A, RUN_B, FabricatedTree
 
 
@@ -123,26 +125,28 @@ def test_cli_exits_1_on_malformed_file_without_touching_postgres(
 
 
 # ---------------------------------------------------------------------------
-# rfp-warehouse sequencing (stage guards only — the dbt run itself is stage 2's
-# own concern and is exercised for real by `rfp-warehouse` against the repo)
+# rfp-warehouse sequencing. Since Phase 6 the command is the tail of the DAG through its
+# driver (pipeline/orchestrate/driver.py::_tail); these two stage guards stay here because
+# they are Phase 4's invariants, stated at Phase 4. The driver's own suite is
+# tests/orchestrate/test_warehouse_subdag.py.
 # ---------------------------------------------------------------------------
 
 
-def test_warehouse_propagates_load_failure_without_running_dbt(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(warehouse.load_cli, "main", lambda argv: 1)
-    ran: list[object] = []
-    monkeypatch.setattr(warehouse.subprocess, "run", lambda *a, **k: ran.append(a))
-    assert warehouse.main() == 1
-    assert ran == []  # a failed load must stop the line before dbt
+def test_warehouse_propagates_load_failure_without_running_dbt(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def failing_load(argv, *, env, log_path=None, echo=True):
+        calls.append(list(argv))
+        return CommandResult(exit_code=1, output="postgres error: connection refused")
+
+    assert run_warehouse(RunOptions(data_root=tmp_path / "data"), run_command=failing_load) == 1
+    # a failed load must stop the line before dbt: exactly one child ran, and it was the loader
+    assert len(calls) == 1 and "pipeline.load" in " ".join(calls[0])
 
 
 def test_warehouse_errors_clearly_when_dbt_project_absent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.chdir(tmp_path)  # no dbt/dbt_project.yml here
-    monkeypatch.setattr(warehouse.load_cli, "main", lambda argv: 0)
-    assert warehouse.main() == 1
-    assert "no dbt project" in capsys.readouterr().err
+    monkeypatch.chdir(tmp_path)  # no dbt/dbt_project.yml here: the preflight refuses to start
+    assert warehouse.main([]) == 1
+    assert "dbt/dbt_project.yml" in capsys.readouterr().err
