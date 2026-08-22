@@ -47,6 +47,7 @@ rfp-validate = "pipeline.validate.cli:main"
 rfp-load = "pipeline.load.cli:main"
 rfp-warehouse = "pipeline.load.warehouse:main"
 rfp-cdc = "pipeline.cdc.cli:main"
+rfp-run = "pipeline.orchestrate.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

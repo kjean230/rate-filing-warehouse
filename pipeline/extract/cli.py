@@ -26,6 +26,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 from pipeline.extract.config import DEFAULT_CONFIG_PATH, ExtractConfigError, load_config
 from pipeline.extract.costlog import CostLog
 from pipeline.extract.llm.client import ExtractionClient, MissingApiKey
@@ -111,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    load_dotenv()  # ANTHROPIC_API_KEY from .env for manual runs, like the ingest and load CLIs
 
     try:
         config = load_config(args.config)

@@ -1,78 +1,41 @@
-"""`rfp-warehouse` — load, then `dbt build`. Sequencing, not orchestration.
+"""`rfp-warehouse` — load, then `dbt build`: the tail of the Phase 6 DAG, through its driver.
 
-Stage 1 is `pipeline.load.cli.main` in-process; stage 2 is dbt as a
-subprocess. There are no retries and no state: a failed stage stops the line,
-and re-running starts from the top — safe, because the loader is
-truncate-and-reload and `dbt build` rebuilds from `raw`. Phase 6 replaces this
-with a real DAG; this exists so Phase 4 is one command rather than two.
+Phase 4 shipped this as two stages with no state so the phase was one command rather than
+two; Phase 6 replaced the implementation rather than the command: `rfp-warehouse` is now
+`DagRun(DAG_WAREHOUSE).warehouse()` — the same two nodes the full DAG ends with, the same
+lock, the same per-node record under `data/orchestration/`. One definition of "load then
+dbt build" exists in the project (`pipeline/orchestrate/driver.py::_tail`), and this command
+is the way to run it alone — after a model edit, or after `python -m pipeline.validate
+--reprocess extracted` — without touching the sources.
+
+`_find_dbt` stays here because it is where the warehouse-marked tests import it from.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
-
-from pipeline.load import cli as load_cli
-
-_DBT_PROJECT_DIR = Path("dbt")
 
 
 def _find_dbt() -> str | None:
     """Resolve the dbt executable, preferring the venv this process runs from.
 
-    `shutil.which` with the interpreter's own bin directory prepended, so
-    `rfp-warehouse` uses the same dbt the project pins even when the venv is
-    not on PATH.
+    `shutil.which` with the interpreter's own bin directory prepended, so the DAG uses
+    the same dbt the project pins even when the venv is not on PATH.
     """
     venv_bin = str(Path(sys.executable).parent)
     search_path = os.pathsep.join([venv_bin, os.environ.get("PATH", "")])
     return shutil.which("dbt", path=search_path)
 
 
-def main() -> int:
-    banner = "=" * 60
-    print(banner)
-    print("stage 1/2: load — truncate-and-reload the raw schema from data/")
-    print(banner)
-    code = load_cli.main([])
-    if code != 0:
-        print(
-            f"load exited {code}; not running dbt over a raw schema that did not load.",
-            file=sys.stderr,
-        )
-        return code
+def main(argv: list[str] | None = None) -> int:
+    # Imported lazily: pipeline.orchestrate.nodes imports `_find_dbt` from this module.
+    from pipeline.orchestrate import DAG_WAREHOUSE
+    from pipeline.orchestrate.cli import main as orchestrate_main
 
-    print()
-    print(banner)
-    print("stage 2/2: dbt build")
-    print(banner)
-    if not (_DBT_PROJECT_DIR / "dbt_project.yml").is_file():
-        print(
-            f"no dbt project at {_DBT_PROJECT_DIR / 'dbt_project.yml'} — cannot run "
-            "`dbt build`. The raw schema is loaded; run dbt once the project exists.",
-            file=sys.stderr,
-        )
-        return 1
-    dbt = _find_dbt()
-    if dbt is None:
-        print(
-            "no `dbt` executable found in this venv or on PATH. "
-            "Install project dependencies first (dbt-postgres is pinned in pyproject.toml).",
-            file=sys.stderr,
-        )
-        return 1
-    # Flush before handing the terminal to dbt: Python buffers stdout when
-    # piped, and unflushed banners would print AFTER the subprocess output.
-    sys.stdout.flush()
-    completed = subprocess.run(
-        [dbt, "build", "--project-dir", str(_DBT_PROJECT_DIR), "--profiles-dir",
-         str(_DBT_PROJECT_DIR)],
-        check=False,
-    )
-    return completed.returncode
+    return orchestrate_main(argv, dag=DAG_WAREHOUSE)
 
 
 if __name__ == "__main__":  # pragma: no cover
