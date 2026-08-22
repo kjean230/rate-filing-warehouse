@@ -394,12 +394,13 @@ currency, real load, real `dbt build`, the record written — twice, converging 
 nodes that were already isolated (ADRs 0004/0006/0009/0012) — not a scheduler, not retries,
 not continuous, not a platform. A DAG over two sources and one fact table.
 
-### Measured — the one real-corpus run (offline, 2026-08-22)
+### Measured — the two real-corpus runs (offline and online, 2026-08-22)
 
 | | |
 | --- | --- |
 | `rfp-run --offline` over the August corpus | detect exit 0 (30 documents, all `current`) → extract and re-detect skipped → validate skipped (`20260821T232503Z` postdates the newest current extract run `20260821T222316Z`) → load 11,775 raw rows → `dbt build` **148 / 148** → **exit 0, converged**; 3 nodes run, 4 skipped with their reasons on the rows; 6.6 s |
-| The record | `data/orchestration/_log/dag_runs.jsonl` (a `running` row, then the terminal row — `detect_before` carries the decision), `dag_nodes.jsonl` (7 rows), `20260822T033830Z/{02-detect,06-load,07-dbt_build}.log` |
+| `rfp-run` (online) over the same corpus | ingest run `20260822T053439Z`: 30 conditional GETs → **30 × 304** (15 OR + 15 PA; honest UA, nothing stored, no 403) → detect exit 0 (30 `unchanged_by_validator`, all `current`) → extract and re-detect skipped → validate skipped (same reason) → load 11,805 raw rows (+30: the new manifest rows) → `dbt build` **148 / 148** → **exit 0, converged**; 4 nodes run, 3 skipped; 71 s, of which ingest 64.8 s (rate-limited); **$0** — no LLM call, no ledger row |
+| The record | `data/orchestration/_log/dag_runs.jsonl` (a `running` row, then the terminal row — `detect_before` carries the decision), `dag_nodes.jsonl` (7 rows per run), `20260822T033830Z/{02-detect,06-load,07-dbt_build}.log`, `20260822T053439Z/{01-ingest,02-detect,06-load,07-dbt_build}.log` |
 | Not run | no live extract (≈$6.6 per full run), no September amendment — the fan-out and the gate are demonstrated on the labelled fixture with scripted nodes; the bootstrap path (a clean clone's first run) likewise |
 
 ### Layout
