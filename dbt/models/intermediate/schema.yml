@@ -7,6 +7,8 @@ models:
       extraction LEDGER (stg_extraction_outcomes) because ADR 0006 makes the ledger the
       authority on run coverage — an output table's own max(run_id) would silently serve
       an older run's rows wherever the newest run produced zero rows of that shape.
+      Dry runs are excluded (ADR 0017); a ledger-v1 row lacks the flag and is read as
+      live — assert_current_extract_run_is_live holds that rule on real data.
     columns:
       - name: filing_id
         tests: [unique, not_null]
@@ -91,10 +93,11 @@ models:
 
   - name: int_quarantine_current
     description: >
-      Row-level current findings: latest COMPLETE validate run (selected from
-      dq_results, which the crashed partial run never wrote), last-status-wins per
-      finding identity (ADR 0009 §6 clears by appending, never deleting). Consumers
-      aggregate to their own grain; nothing here re-evaluates a rule.
+      Row-level current findings: latest COMPLETE, FULL-CORPUS validate run (selected
+      from dq_results, which the crashed partial run never wrote; a --filing run is
+      excluded by scope — ADR 0019), last-status-wins per finding identity (ADR 0009 §6
+      clears by appending, never deleting). Consumers aggregate to their own grain;
+      nothing here re-evaluates a rule.
     columns:
       - name: rule_id
         tests: [not_null]
@@ -108,8 +111,201 @@ models:
         tests:
           - accepted_values:
               values: ['evaluated', 'adopted']
+      - name: reprocess_status
+        tests:
+          - accepted_values:
+              values: ['open', 'resolved']
+
+  - name: int_document_versions
+    description: >
+      Content versions of every document (Phase 5, ADR 0018): one row per
+      (filing_id, document_role, content_version_seq), a version being an episode of
+      identical bytes in the append-only manifest (304 sightings fold into their
+      version; failed sightings open nothing). Each version carries its first-sight
+      validators and the latest LIVE extraction of those bytes; each transition carries
+      the three-signal verdict — validator_moved / bytes_moved (true by construction) /
+      fields_moved (true / false / NULL = unknown). Derived with window functions, not
+      dbt snapshot, for ADR 0014's reasons. On the August corpus every key has one
+      version; the cells of the reading table are exercised by the unit tests below.
+    columns:
+      - name: filing_id
+        tests: [not_null]
+      - name: document_role
+        tests: [not_null]
+      - name: content_version_seq
+        tests: [not_null]
+      - name: content_hash
+        tests: [not_null]
+      - name: first_seen_at
+        tests: [not_null]
+      - name: fields_moved
+        description: >
+          NULL is UNKNOWN — a side lacks a hash (ledger v1, or no source-determined
+          field) or the versions were hashed under different normalized_hash_version
+          values. Never coalesced to false.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [filing_id, document_role, content_version_seq]
 
 unit_tests:
+  - name: versions_substantive_amendment_moves_all_three_signals
+    description: >
+      Reading-table cell Δ Δ Δ: a republish with a new validator, new bytes, and a
+      different normalized-field hash is a substantive amendment. Version 1 carries
+      NULL verdicts (nothing to compare against) and is no longer current.
+    model: int_document_versions
+    given:
+      - input: ref('stg_ingest_manifest')
+        rows:
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R1', retrieved_at: 'T1', content_hash: H1, etag: e1, sharepoint_version: 3, http_status: 200, error: null}
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R2', retrieved_at: 'T2', content_hash: H2, etag: e2, sharepoint_version: 4, http_status: 200, error: null}
+      - input: ref('stg_extraction_outcomes')
+        rows:
+          - {filing_id: f, document_role: urrt, content_hash: H1, run_id: 'E1', status: extracted, normalized_field_hash: N1, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
+          - {filing_id: f, document_role: urrt, content_hash: H2, run_id: 'E2', status: extracted, normalized_field_hash: N2, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
+    expect:
+      rows:
+        - {filing_id: f, document_role: urrt, content_version_seq: 1, content_hash: H1, prior_content_hash: null, is_current: false, extract_run_id: 'E1', sharepoint_version: 3, prior_sharepoint_version: null, validator_moved: null, bytes_moved: null, fields_moved: null}
+        - {filing_id: f, document_role: urrt, content_version_seq: 2, content_hash: H2, prior_content_hash: H1, is_current: true, extract_run_id: 'E2', sharepoint_version: 4, prior_sharepoint_version: 3, validator_moved: true, bytes_moved: true, fields_moved: true}
+
+  - name: versions_cosmetic_republish_leaves_fields_unmoved
+    description: >
+      Reading-table cell Δ Δ =: the raw-byte false positive the design exists for — a
+      regenerated document (new ETag, new bytes) whose source-determined fields hash
+      identically. fields_moved is FALSE, not unknown.
+    model: int_document_versions
+    given:
+      - input: ref('stg_ingest_manifest')
+        rows:
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R1', retrieved_at: 'T1', content_hash: H1, etag: e1, error: null}
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R2', retrieved_at: 'T2', content_hash: H2, etag: e2, error: null}
+      - input: ref('stg_extraction_outcomes')
+        rows:
+          - {filing_id: f, document_role: urrt, content_hash: H1, run_id: 'E1', normalized_field_hash: N1, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
+          - {filing_id: f, document_role: urrt, content_hash: H2, run_id: 'E2', normalized_field_hash: N1, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
+    expect:
+      rows:
+        - {content_version_seq: 1, validator_moved: null, bytes_moved: null, fields_moved: null}
+        - {content_version_seq: 2, validator_moved: true, bytes_moved: true, fields_moved: false}
+
+  - name: versions_validator_churn_and_304s_fold_into_one_version
+    description: >
+      Reading-table cell Δ = =: the validator moved (a new ETag) but the bytes did not
+      — that is not a new version. A 304 and a 200-same-hash sighting are sightings of
+      the SAME episode: one row, sighting_count 3, first-sight ETag kept, last_seen_at
+      advanced, still current.
+    model: int_document_versions
+    given:
+      - input: ref('stg_ingest_manifest')
+        rows:
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R1', retrieved_at: 'T1', content_hash: H1, etag: e1, http_status: 200, error: null}
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R2', retrieved_at: 'T2', content_hash: H1, etag: e1, http_status: 304, error: null}
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R3', retrieved_at: 'T3', content_hash: H1, etag: e9, http_status: 200, error: null}
+      - input: ref('stg_extraction_outcomes')
+        rows:
+          - {filing_id: f, document_role: urrt, content_hash: H1, run_id: 'E1', normalized_field_hash: N1, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
+    expect:
+      rows:
+        - {content_version_seq: 1, content_hash: H1, etag: e1, first_seen_at: 'T1', last_seen_at: 'T3', sighting_count: 3, is_current: true, validator_moved: null}
+
+  - name: versions_validator_blind_republish_is_visible_in_bytes
+    description: >
+      Reading-table cell = Δ —: new bytes under an UNCHANGED validator (possible on PA's
+      static DAM, impossible on Oregon's monotonic {GUID},N ETag). bytes_moved is true by
+      construction; validator_moved is false; fields_moved reads whatever the hashes say.
+    model: int_document_versions
+    given:
+      - input: ref('stg_ingest_manifest')
+        rows:
+          - {filing_id: f, document_role: filing_packet, state: PA, run_id: 'R1', retrieved_at: 'T1', content_hash: H1, etag: e1, last_modified: lm1, error: null}
+          - {filing_id: f, document_role: filing_packet, state: PA, run_id: 'R2', retrieved_at: 'T2', content_hash: H2, etag: e1, last_modified: lm1, error: null}
+      - input: ref('stg_extraction_outcomes')
+        rows:
+          - {filing_id: f, document_role: filing_packet, content_hash: H1, run_id: 'E1', normalized_field_hash: N1, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
+          - {filing_id: f, document_role: filing_packet, content_hash: H2, run_id: 'E2', normalized_field_hash: N2, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
+    expect:
+      rows:
+        - {content_version_seq: 1, validator_moved: null, bytes_moved: null, fields_moved: null}
+        - {content_version_seq: 2, validator_moved: false, bytes_moved: true, fields_moved: true}
+
+  - name: versions_fields_moved_is_unknown_without_two_comparable_hashes
+    description: >
+      NULL means unknown, never unchanged: (a) the prior version's extraction is a
+      ledger-v1 row with no hash; (b) the new version's hash was computed under a
+      different normalized_hash_version — a re-baseline, not a change. Both read NULL
+      for fields_moved while validator/bytes still report. (c) is the contrast: a
+      version whose only extraction is a DRY run still has a hash — the hash is
+      LLM-invariant (docs/cdc-comparison.md §6b) — so the dry run stands in when
+      nothing live exists and fields_moved is decided.
+    model: int_document_versions
+    given:
+      - input: ref('stg_ingest_manifest')
+        rows:
+          - {filing_id: a, document_role: urrt, state: OR, run_id: 'R1', retrieved_at: 'T1', content_hash: H1, etag: e1, error: null}
+          - {filing_id: a, document_role: urrt, state: OR, run_id: 'R2', retrieved_at: 'T2', content_hash: H2, etag: e2, error: null}
+          - {filing_id: b, document_role: urrt, state: OR, run_id: 'R1', retrieved_at: 'T1', content_hash: H1, etag: e1, error: null}
+          - {filing_id: b, document_role: urrt, state: OR, run_id: 'R2', retrieved_at: 'T2', content_hash: H2, etag: e2, error: null}
+          - {filing_id: c, document_role: urrt, state: OR, run_id: 'R1', retrieved_at: 'T1', content_hash: H1, etag: e1, error: null}
+          - {filing_id: c, document_role: urrt, state: OR, run_id: 'R2', retrieved_at: 'T2', content_hash: H2, etag: e2, error: null}
+      - input: ref('stg_extraction_outcomes')
+        rows:
+          # (a) v1 prior: no hash key at all
+          - {filing_id: a, document_role: urrt, content_hash: H1, run_id: 'E1', normalized_field_hash: null, normalized_hash_version: null, has_normalized_hash: false, dry_run: null}
+          - {filing_id: a, document_role: urrt, content_hash: H2, run_id: 'E2', normalized_field_hash: N2, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
+          # (b) version boundary
+          - {filing_id: b, document_role: urrt, content_hash: H1, run_id: 'E1', normalized_field_hash: N1, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
+          - {filing_id: b, document_role: urrt, content_hash: H2, run_id: 'E2', normalized_field_hash: N9, normalized_hash_version: 2, has_normalized_hash: true, dry_run: false}
+          # (c) the new bytes were only ever dry-run extracted — the dry run stands in
+          - {filing_id: c, document_role: urrt, content_hash: H1, run_id: 'E1', normalized_field_hash: N1, normalized_hash_version: 1, has_normalized_hash: true, dry_run: false}
+          - {filing_id: c, document_role: urrt, content_hash: H2, run_id: 'E3', normalized_field_hash: N2, normalized_hash_version: 1, has_normalized_hash: true, dry_run: true}
+    expect:
+      rows:
+        - {filing_id: a, content_version_seq: 1, validator_moved: null, bytes_moved: null, fields_moved: null, prior_normalized_field_hash: null, normalized_hash_version: null, prior_normalized_hash_version: null, extract_run_id: 'E1'}
+        - {filing_id: a, content_version_seq: 2, validator_moved: true, bytes_moved: true, fields_moved: null, prior_normalized_field_hash: null, normalized_hash_version: 1, prior_normalized_hash_version: null, extract_run_id: 'E2'}
+        - {filing_id: b, content_version_seq: 1, validator_moved: null, bytes_moved: null, fields_moved: null, prior_normalized_field_hash: null, normalized_hash_version: 1, prior_normalized_hash_version: null, extract_run_id: 'E1'}
+        - {filing_id: b, content_version_seq: 2, validator_moved: true, bytes_moved: true, fields_moved: null, prior_normalized_field_hash: N1, normalized_hash_version: 2, prior_normalized_hash_version: 1, extract_run_id: 'E2'}
+        - {filing_id: c, content_version_seq: 1, validator_moved: null, bytes_moved: null, fields_moved: null, prior_normalized_field_hash: null, normalized_hash_version: 1, prior_normalized_hash_version: null, extract_run_id: 'E1'}
+        - {filing_id: c, content_version_seq: 2, validator_moved: true, bytes_moved: true, fields_moved: true, prior_normalized_field_hash: N1, normalized_hash_version: 1, prior_normalized_hash_version: 1, extract_run_id: 'E3'}
+
+  - name: versions_are_episodes_and_failed_sightings_open_nothing
+    description: >
+      A revert A -> B -> A is three episodes (what happened), not two distinct hashes;
+      a failed sighting (error populated) certifies nothing and opens no version.
+    model: int_document_versions
+    given:
+      - input: ref('stg_ingest_manifest')
+        rows:
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R1', retrieved_at: 'T1', content_hash: H1, error: null}
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R2', retrieved_at: 'T2', content_hash: H2, error: null}
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R3', retrieved_at: 'T3', content_hash: null, error: 'HTTP 500'}
+          - {filing_id: f, document_role: urrt, state: OR, run_id: 'R4', retrieved_at: 'T4', content_hash: H1, error: null}
+      - input: ref('stg_extraction_outcomes')
+        rows: []
+    expect:
+      rows:
+        - {content_version_seq: 1, content_hash: H1, first_run_id: 'R1', is_current: false, prior_content_hash: null}
+        - {content_version_seq: 2, content_hash: H2, first_run_id: 'R2', is_current: false, prior_content_hash: H1}
+        - {content_version_seq: 3, content_hash: H1, first_run_id: 'R4', is_current: true, prior_content_hash: H2}
+
+  - name: extract_run_current_ignores_dry_runs_and_reads_v1_as_live
+    description: >
+      A later dry-run outcome row (run E3) must not outrank the filing's latest LIVE run
+      (E2). A v1 row (dry_run NULL — the key did not exist) is read as live. A filing whose
+      only extraction is a dry run (g — a clean clone without an API key) takes that dry
+      run as current: it is the extraction there is.
+    model: int_extract_run_current
+    given:
+      - input: ref('stg_extraction_outcomes')
+        rows:
+          - {filing_id: f, run_id: 'E1', dry_run: null}
+          - {filing_id: f, run_id: 'E2', dry_run: false}
+          - {filing_id: f, run_id: 'E3', dry_run: true}
+          - {filing_id: g, run_id: 'E3', dry_run: true}
+    expect:
+      rows:
+        - {filing_id: f, run_id: 'E2'}
+        - {filing_id: g, run_id: 'E3'}
+
   - name: scd2_versions_a_label_change
     description: >
       THE PHASE 4 GATE DEMONSTRATION (ADR 0014). A fixture rename — labeled as a
@@ -159,8 +355,8 @@ unit_tests:
     given:
       - input: ref('stg_dq_results')
         rows:
-          - {run_id: 'V1'}
-          - {run_id: 'V2'}
+          - {run_id: 'V1', has_scope: false, scope: null}
+          - {run_id: 'V2', has_scope: true, scope: corpus}
       - input: ref('stg_quarantine')
         rows:
           - {run_id: 'V1', quarantined_at: 'T1', rule_id: R, filing_id: f, subject_key: p1, field_name: x, extract_run_id: E, reprocess_status: open, severity: error, grain: plan, source_line: 1}
@@ -172,6 +368,27 @@ unit_tests:
       rows:
         - {run_id: 'V2', subject_key: p1, reprocess_status: resolved}
         - {run_id: 'V2', subject_key: p2, reprocess_status: open}
+
+  - name: quarantine_a_filing_scoped_run_is_never_current
+    description: >
+      Trap T3 (ADR 0019): a later `--filing` validate run (V3, scope=filing) writes
+      results too, but must never be selected as the warehouse's current run — it
+      would erase every other filing's findings. V2 (corpus) stays current; a v1 row
+      (has_scope false) reads as corpus.
+    model: int_quarantine_current
+    given:
+      - input: ref('stg_dq_results')
+        rows:
+          - {run_id: 'V1', has_scope: false, scope: null}
+          - {run_id: 'V2', has_scope: true, scope: corpus}
+          - {run_id: 'V3', has_scope: true, scope: filing}
+      - input: ref('stg_quarantine')
+        rows:
+          - {run_id: 'V2', quarantined_at: 'T2', rule_id: R, filing_id: f, subject_key: p1, field_name: x, extract_run_id: E, reprocess_status: open, severity: error, grain: plan, source_line: 1}
+          - {run_id: 'V3', quarantined_at: 'T3', rule_id: R, filing_id: g, subject_key: p9, field_name: x, extract_run_id: E, reprocess_status: open, severity: error, grain: plan, source_line: 2}
+    expect:
+      rows:
+        - {run_id: 'V2', filing_id: f, subject_key: p1, reprocess_status: open}
 
   - name: conformed_field_precedence_across_oregon_duality
     description: >

@@ -35,3 +35,39 @@ unit_tests:
         - {run_id: R1, manifest_schema_version: 1, has_posted_avg_rate: false, avg_rate_request_posted: null, avg_rate_request_posted_fraction: null}
         - {run_id: R2, manifest_schema_version: 2, has_posted_avg_rate: true, avg_rate_request_posted: '11.7%', avg_rate_request_posted_fraction: 0.117}
         - {run_id: R3, manifest_schema_version: 2, has_posted_avg_rate: true, avg_rate_request_posted: null, avg_rate_request_posted_fraction: null}
+
+  - name: ledger_v1_lacks_the_v2_columns_v2_carries_them
+    description: >
+      ADR 0017's boundary (the ADR 0011 rule, third use), on synthetic payloads: a v1
+      outcome row LACKS normalized_field_hash and dry_run (both has_* flags false); a v2
+      row carries them — including a v2 row whose hash is an explicit null (a document
+      with no source-determined field) and whose dry_run is true. "v2, undefined hash"
+      must stay distinguishable from "v1, column did not exist yet".
+    model: stg_extraction_outcomes
+    given:
+      - input: source('raw', 'extraction_outcomes')
+        format: sql
+        rows: |
+          select '{"run_id": "E1", "filing_id": "or-2027-indv-x", "state": "OR",
+                   "document_role": "urrt", "status": "extracted", "ledger_version": 1}'::jsonb
+                 as payload,
+                 'extracted/_log/extraction_outcomes.jsonl' as source_file, 1 as source_line,
+                 now() as loaded_at, 'L1' as load_id
+          union all
+          select '{"run_id": "E2", "filing_id": "or-2027-indv-x", "state": "OR",
+                   "document_role": "urrt", "status": "extracted", "ledger_version": 2,
+                   "normalized_field_hash": "sha256:abc", "normalized_hash_version": 1,
+                   "normalized_field_count": 3, "dry_run": false}'::jsonb,
+                 'extracted/_log/extraction_outcomes.jsonl', 2, now(), 'L1'
+          union all
+          select '{"run_id": "E3", "filing_id": "or-2027-indv-x", "state": "OR",
+                   "document_role": "cost_containment", "status": "partial",
+                   "ledger_version": 2, "normalized_field_hash": null,
+                   "normalized_hash_version": 1, "normalized_field_count": 0,
+                   "dry_run": true}'::jsonb,
+                 'extracted/_log/extraction_outcomes.jsonl', 3, now(), 'L1'
+    expect:
+      rows:
+        - {run_id: E1, ledger_version: 1, has_normalized_hash: false, normalized_field_hash: null, normalized_hash_version: null, has_dry_run_flag: false, dry_run: null}
+        - {run_id: E2, ledger_version: 2, has_normalized_hash: true, normalized_field_hash: 'sha256:abc', normalized_hash_version: 1, has_dry_run_flag: true, dry_run: false}
+        - {run_id: E3, ledger_version: 2, has_normalized_hash: true, normalized_field_hash: null, normalized_hash_version: 1, has_dry_run_flag: true, dry_run: true}

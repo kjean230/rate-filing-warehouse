@@ -19,6 +19,15 @@ select
     (payload ->> 'not_evaluated')::int as not_evaluated,
     (payload ->> 'adopted')::int as adopted,
 
+    -- DQ schema v2 (Phase 5, ADR 0019). `resolved` counts the resolution rows this run
+    -- appended for the rule (apart from the verdict identity; inside the store
+    -- reconciliation). `scope` is corpus|filing; a v1 row LACKS the key (has_scope
+    -- false) and is read as corpus by the stated rule — every v1 complete run was
+    -- full-corpus — not by coalescing a null.
+    (payload ->> 'resolved')::int as resolved,
+    payload ->> 'scope' as scope,
+    (payload ? 'scope') as has_scope,
+
     payload -> 'states' as states,
     (payload ->> 'dq_schema_version')::int as dq_schema_version,
 

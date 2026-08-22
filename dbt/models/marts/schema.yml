@@ -8,8 +8,9 @@ models:
       and how far it was checked, never that the rate is correct: the vetted measure
       (rate_change_requested) is NULL for anything error-quarantined, the as-parsed
       column preserves what extraction read, and rate_change_status names which claim
-      each row supports. Only 20 of 583 PA rows validate against the carrier's own
-      statement (gqo alone); the status column is where that fact lives in SQL.
+      each row supports. 21 rows in 2 filings validate against the carrier's own
+      statement; only gqo's 20 do so with plan-level variation — the status column is
+      where that fact lives in SQL.
       Statuses ATTRIBUTE Phase 3 verdicts — nothing here re-evaluates a rule
       (ADR 0013 / ADR 0008 §4).
     columns:
@@ -46,6 +47,37 @@ models:
                 - carrier_range_validated
                 - single_source_deterministic
                 - unvalidated_parse
+      - name: approved_rate_change_pct
+        description: >
+          The APPROVED measure, vetted (Phase 5, ADR 0018): NULL unless
+          approved_rate_change_status says trustworthy. Structurally NULL on the August
+          2026 corpus — no extraction path produces it until the September final orders
+          are observed; the column existing is not the measure existing.
+      - name: approved_rate_change_pct_as_parsed
+        description: What extraction read for the approved measure, always.
+      - name: approved_rate_change_status
+        description: >
+          First-match trust status of the approved measure — the same vocabulary as
+          rate_change_status minus carrier_range_validated (no carrier-stated APPROVED
+          range exists in the schema; the branch is added with its input, if any).
+          649 × missing today.
+        tests:
+          - not_null
+          - accepted_values:
+              values:
+                - quarantined
+                - cell_error
+                - missing
+                - structural_zero
+                - single_source_deterministic
+                - unvalidated_parse
+      - name: approved_quarantine_rule_ids
+        description: Open error findings on approved_rate_change_pct that decided 'quarantined'.
+      - name: approved_minus_requested
+        description: >
+          approved − requested at the row's grain, from VETTED inputs only (NULL unless
+          both survive their status). A difference of two fractions: 0.02 = two
+          percentage points. Never pre-aggregated; PA carries no enrollment to weight by.
       - name: market
         description: Individual only — a second value here is LOB scope drift.
         tests:
@@ -82,6 +114,17 @@ models:
         tests:
           - accepted_values:
               values: ['individual']
+      - name: content_version_count
+        description: >
+          Amendment attribute (Phase 5, ADR 0018): content versions of the filing's
+          most-republished document; 1 = never republished. From
+          int_document_versions; NULL only if no retrieval history is loaded.
+      - name: last_content_change_at
+        description: When a document's bytes last changed (first sight of a version > 1); NULL if never.
+      - name: last_substantive_change_at
+        description: >
+          When a document's source-determined fields last changed (fields_moved true);
+          NULL if never, or if no republish could be compared.
 
   - name: dim_plan
     description: >
@@ -180,10 +223,57 @@ unit_tests:
           - {hios_issuer_id: '33333', company_key: ck3, valid_from: '00000000T000000Z', valid_to: null}
     expect:
       rows:
-        - {plan_id_hios: '11111PA0010001', rate_change_status: quarantined, rate_change_requested: null, rate_change_requested_as_parsed: 0.05}
-        - {plan_id_hios: '11111PA0010002', rate_change_status: cell_error, rate_change_requested: null, rate_change_requested_as_parsed: null}
-        - {plan_id_hios: '11111PA0010003', rate_change_status: missing, rate_change_requested: null, rate_change_requested_as_parsed: null}
-        - {plan_id_hios: '11111PA0010004', rate_change_status: carrier_range_validated, rate_change_requested: 0.12, rate_change_requested_as_parsed: 0.12}
-        - {plan_id_hios: '22222OR0020001', rate_change_status: structural_zero, rate_change_requested: 0, rate_change_requested_as_parsed: 0}
-        - {plan_id_hios: '22222OR0020002', rate_change_status: single_source_deterministic, rate_change_requested: 0.14, rate_change_requested_as_parsed: 0.14}
-        - {plan_id_hios: '33333PA0030001', rate_change_status: unvalidated_parse, rate_change_requested: 0.08, rate_change_requested_as_parsed: 0.08}
+        - {plan_id_hios: '11111PA0010001', rate_change_status: quarantined, rate_change_requested: null, rate_change_requested_as_parsed: 0.05, approved_rate_change_status: missing, approved_minus_requested: null}
+        - {plan_id_hios: '11111PA0010002', rate_change_status: cell_error, rate_change_requested: null, rate_change_requested_as_parsed: null, approved_rate_change_status: missing, approved_minus_requested: null}
+        - {plan_id_hios: '11111PA0010003', rate_change_status: missing, rate_change_requested: null, rate_change_requested_as_parsed: null, approved_rate_change_status: missing, approved_minus_requested: null}
+        - {plan_id_hios: '11111PA0010004', rate_change_status: carrier_range_validated, rate_change_requested: 0.12, rate_change_requested_as_parsed: 0.12, approved_rate_change_status: missing, approved_minus_requested: null}
+        - {plan_id_hios: '22222OR0020001', rate_change_status: structural_zero, rate_change_requested: 0, rate_change_requested_as_parsed: 0, approved_rate_change_status: missing, approved_minus_requested: null}
+        - {plan_id_hios: '22222OR0020002', rate_change_status: single_source_deterministic, rate_change_requested: 0.14, rate_change_requested_as_parsed: 0.14, approved_rate_change_status: missing, approved_minus_requested: null}
+        - {plan_id_hios: '33333PA0030001', rate_change_status: unvalidated_parse, rate_change_requested: 0.08, rate_change_requested_as_parsed: 0.08, approved_rate_change_status: missing, approved_minus_requested: null}
+
+  - name: fct_approved_status_derivation_covers_every_branch
+    description: >
+      The approved measure's triple (Phase 5, ADR 0018): one mock plan per
+      approved_rate_change_status value, asserting the status, the vetted rule (NULL for
+      quarantined / cell_error / missing), and that approved_minus_requested exists only
+      when BOTH vetted measures exist. No branch is fabricated into real data — the real
+      corpus is 649 × missing until the September final orders are extracted.
+    model: fct_plan_rate
+    given:
+      - input: ref('int_plans_current')
+        rows:
+          # quarantined approved, vetted requested -> delta NULL
+          - {filing_id: pa-f1, plan_id_hios: '11111PA0010001', state: PA, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0.12, cumulative_rate_change_pct_is_cell_error: false, approved_rate_change_pct: 0.10, approved_rate_change_pct_is_cell_error: false, plan_category: null}
+          # cell_error approved
+          - {filing_id: pa-f1, plan_id_hios: '11111PA0010002', state: PA, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0.12, cumulative_rate_change_pct_is_cell_error: false, approved_rate_change_pct: null, approved_rate_change_pct_is_cell_error: true, plan_category: null}
+          # missing approved
+          - {filing_id: pa-f1, plan_id_hios: '11111PA0010003', state: PA, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0.12, cumulative_rate_change_pct_is_cell_error: false, approved_rate_change_pct: null, approved_rate_change_pct_is_cell_error: false, plan_category: null}
+          # unvalidated_parse approved (PA, no approved range exists), vetted requested -> delta
+          - {filing_id: pa-f1, plan_id_hios: '11111PA0010004', state: PA, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0.12, cumulative_rate_change_pct_is_cell_error: false, approved_rate_change_pct: 0.10, approved_rate_change_pct_is_cell_error: false, plan_category: Renewing}
+          # approved present but requested QUARANTINED -> delta NULL
+          - {filing_id: pa-f1, plan_id_hios: '11111PA0010005', state: PA, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0.30, cumulative_rate_change_pct_is_cell_error: false, approved_rate_change_pct: 0.10, approved_rate_change_pct_is_cell_error: false, plan_category: Renewing}
+          # OR New plan: structural_zero both sides -> delta 0 (both vetted)
+          - {filing_id: or-f2, plan_id_hios: '22222OR0020001', state: OR, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0, cumulative_rate_change_pct_is_cell_error: false, approved_rate_change_pct: 0, approved_rate_change_pct_is_cell_error: false, plan_category: New}
+          # OR Renewing: single_source_deterministic both sides -> delta
+          - {filing_id: or-f2, plan_id_hios: '22222OR0020002', state: OR, plan_year: 2027, run_id: E1, cumulative_rate_change_pct: 0.14, cumulative_rate_change_pct_is_cell_error: false, approved_rate_change_pct: 0.11, approved_rate_change_pct_is_cell_error: false, plan_category: Renewing}
+      - input: ref('int_filing_conformed')
+        rows:
+          - {filing_id: pa-f1, state: PA, market: individual, hios_issuer_id: '11111', rate_change_min: 0.10, rate_change_max: 0.15}
+          - {filing_id: or-f2, state: OR, market: individual, hios_issuer_id: '22222', rate_change_min: null, rate_change_max: null}
+      - input: ref('int_quarantine_current')
+        rows:
+          - {filing_id: pa-f1, subject_key: '11111PA0010001', field_name: approved_rate_change_pct, rule_id: PLAN_APPROVED_RATE_WITHIN_PLAUSIBLE_BOUNDS, severity: error, grain: plan, reprocess_status: open}
+          - {filing_id: pa-f1, subject_key: '11111PA0010005', field_name: cumulative_rate_change_pct, rule_id: PA_PLAN_RATE_IN_STATED_RANGE, severity: error, grain: plan, reprocess_status: open}
+      - input: ref('dim_company')
+        rows:
+          - {hios_issuer_id: '11111', company_key: ck1, valid_from: '00000000T000000Z', valid_to: null}
+          - {hios_issuer_id: '22222', company_key: ck2, valid_from: '00000000T000000Z', valid_to: null}
+    expect:
+      rows:
+        - {plan_id_hios: '11111PA0010001', approved_rate_change_status: quarantined, approved_rate_change_pct: null, approved_rate_change_pct_as_parsed: 0.10, rate_change_status: carrier_range_validated, approved_minus_requested: null}
+        - {plan_id_hios: '11111PA0010002', approved_rate_change_status: cell_error, approved_rate_change_pct: null, approved_rate_change_pct_as_parsed: null, rate_change_status: carrier_range_validated, approved_minus_requested: null}
+        - {plan_id_hios: '11111PA0010003', approved_rate_change_status: missing, approved_rate_change_pct: null, approved_rate_change_pct_as_parsed: null, rate_change_status: carrier_range_validated, approved_minus_requested: null}
+        - {plan_id_hios: '11111PA0010004', approved_rate_change_status: unvalidated_parse, approved_rate_change_pct: 0.10, approved_rate_change_pct_as_parsed: 0.10, rate_change_status: carrier_range_validated, approved_minus_requested: -0.02}
+        - {plan_id_hios: '11111PA0010005', approved_rate_change_status: unvalidated_parse, approved_rate_change_pct: 0.10, approved_rate_change_pct_as_parsed: 0.10, rate_change_status: quarantined, approved_minus_requested: null}
+        - {plan_id_hios: '22222OR0020001', approved_rate_change_status: structural_zero, approved_rate_change_pct: 0, approved_rate_change_pct_as_parsed: 0, rate_change_status: structural_zero, approved_minus_requested: 0}
+        - {plan_id_hios: '22222OR0020002', approved_rate_change_status: single_source_deterministic, approved_rate_change_pct: 0.11, approved_rate_change_pct_as_parsed: 0.11, rate_change_status: single_source_deterministic, approved_minus_requested: -0.03}

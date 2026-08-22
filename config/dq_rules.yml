@@ -86,6 +86,11 @@ cell_error_fields:
   - loss_ratio
   - plan_adjusted_index_rate    # cached as formatted text; CellError when unparseable
   - calibrated_plan_adjusted_index_rate
+  # The approved measure (Phase 5). Both are MaybeDecimal in the schema and both are
+  # structurally NULL on the August corpus; listed now so a rule over them must state
+  # its CellError policy from the first day a value could arrive.
+  - approved_rate_change_pct
+  - avg_rate_change_approved
 
 # ---------------------------------------------------------------------------
 # Phase 2 findings this layer NAMES rather than re-derives.
@@ -228,6 +233,29 @@ rules:
     params:
       field: cumulative_rate_change_pct
 
+  - id: PA_PLAN_APPROVED_RATE_NOT_DEGENERATE
+    kind: intra_filing
+    grain: plan
+    severity: error
+    scope: {state: [PA]}
+    check: not_degenerate
+    on_cell_error: not_applicable
+    description: >-
+      The approved measure's twin of PA_PLAN_RATE_NOT_DEGENERATE (Phase 5,
+      ADR 0018): a filing's parsed APPROVED plan rates must not all be the same
+      value, for the same reason — an identical value on every plan is the
+      signature of a filing-level figure lifted from a summary row, and only 8 of
+      15 PA carriers state a range to catch it any other way.
+
+      Config-only today: approved_rate_change_pct is structurally NULL on the
+      August 2026 corpus (no extraction path produces it yet — the September
+      final orders are observation-first), so every row is `not_evaluated` until
+      values arrive. The rule exists now so the first run that carries approved
+      values is checked by a rule that already reported, not by one written after.
+    params:
+      field: approved_rate_change_pct
+      min_rows: 3
+
   # =========================================================================
   # BOTH STATES — plan grain
   # =========================================================================
@@ -294,6 +322,50 @@ rules:
       field: cumulative_rate_change_pct
       min: "-0.5"
       max: "1.0"
+
+  - id: PLAN_APPROVED_RATE_WITHIN_PLAUSIBLE_BOUNDS
+    kind: intra_row
+    grain: plan
+    severity: error
+    scope: {state: [PA, OR]}
+    check: range
+    on_cell_error: not_applicable
+    description: >-
+      The approved measure's twin of PLAN_RATE_WITHIN_PLAUSIBLE_BOUNDS (Phase 5,
+      ADR 0018): an approved cumulative rate change outside -50%..+100% is a unit
+      error or a misparse, not a final order. Same floor, same reason — it catches
+      a percentage stored unscaled, which every other numeric rule would pass.
+
+      Config-only today: approved_rate_change_pct is structurally NULL on the
+      August 2026 corpus, so every row is `not_evaluated` until the September
+      final orders are extracted (observation-first; the extraction path is
+      decided when the republished documents are seen, not before).
+    params:
+      field: approved_rate_change_pct
+      min: "-0.5"
+      max: "1.0"
+
+  - id: PLAN_APPROVED_RATE_PRESENT_WHEN_FILING_FINAL
+    kind: intra_filing
+    grain: plan
+    severity: warn
+    scope: {state: [PA, OR]}
+    check: present
+    on_cell_error: not_applicable
+    description: >-
+      Once a filing's FINAL order has landed — read as "the filing row states
+      avg_rate_change_approved" — every plan row should carry an approved rate
+      change; a plan without one is a parse gap in the final-order document, the
+      approved twin of PA_PLAN_RATE_PRESENT.
+
+      Gated by `when_filing_field` deliberately (Phase 5, ADR 0018): before the
+      filing is final, 649 plan rows have no approved value and that is not a
+      finding. A presence rule firing 649 warns on the August corpus would train
+      the exit code to be ignored (ADR 0009 §7). Every row is `not_evaluated`
+      until a filing row carries an approved average.
+    params:
+      field: approved_rate_change_pct
+      when_filing_field: avg_rate_change_approved
 
   # =========================================================================
   # FILING GRAIN

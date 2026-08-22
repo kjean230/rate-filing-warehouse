@@ -76,6 +76,79 @@ CELL_ERROR = {"raw": "#VALUE!", "cell": "Wksh 2!E22"}
 
 
 # ---------------------------------------------------------------------------
+# Phase 5 — the approved measure's rules wait for the filing to be final
+# ---------------------------------------------------------------------------
+
+
+def _gated_presence():
+    return rule(
+        kind="intra_filing",
+        severity="warn",
+        check="present",
+        params={
+            "field": "approved_rate_change_pct",
+            "when_filing_field": "avg_rate_change_approved",
+        },
+    )
+
+
+def test_a_gated_presence_rule_is_not_evaluated_until_the_filing_states_the_gate():
+    """649 rows with no approved value are not 649 findings before the final order."""
+    filing = filing_row("or-2027-indv-test")  # avg_rate_change_approved absent
+    plan = plan_row("39424OR1660004", metal="Gold")
+    verdict, message, _, _ = evaluate(
+        _gated_presence(), make_subject(plan), make_bundle(plans=[plan], filings=[filing])
+    )
+    assert verdict is Verdict.NOT_EVALUATED
+    assert "not expected yet" in message
+
+
+def test_a_gated_presence_rule_fires_once_the_filing_is_final():
+    filing = filing_row("or-2027-indv-test", avg_rate_change_approved="0.10")
+    missing = plan_row("39424OR1660004", metal="Gold")
+    present = plan_row("39424OR1660005", metal="Gold", approved_rate_change_pct="0.09")
+    bundle = make_bundle(plans=[missing, present], filings=[filing])
+    assert evaluate(_gated_presence(), make_subject(missing), bundle)[0] is Verdict.VIOLATION
+    assert evaluate(_gated_presence(), make_subject(present), bundle)[0] is Verdict.PASS
+
+
+def test_an_unusable_gate_value_reads_as_not_stated():
+    filing = filing_row("or-2027-indv-test", avg_rate_change_approved=None)
+    filing["avg_rate_change_approved"] = CELL_ERROR
+    plan = plan_row("39424OR1660004", metal="Gold")
+    verdict, _, _, _ = evaluate(
+        _gated_presence(), make_subject(plan), make_bundle(plans=[plan], filings=[filing])
+    )
+    assert verdict is Verdict.NOT_EVALUATED
+
+
+def test_the_shipped_approved_rules_are_not_evaluated_on_an_august_shaped_filing():
+    """Config-only until the final orders: every verdict is not_evaluated, none is a
+    pass and none is a violation, so the exit code is not trained to be ignored."""
+    from pipeline.validate.config import load_rules
+    from tests.validate.conftest import RULES_PATH
+
+    config = load_rules(RULES_PATH)
+    filing = filing_row("pa-2027-indv-test", state="PA", rate_change_min="0.10",
+                        rate_change_max="0.20")
+    plans = [
+        plan_row(f"12345PA001000{i}", state="PA", cumulative_rate_change_pct="0.12")
+        for i in range(1, 5)
+    ]
+    bundle = make_bundle(plans=plans, filings=[filing], state="PA")
+    for rule_id in (
+        "PLAN_APPROVED_RATE_WITHIN_PLAUSIBLE_BOUNDS",
+        "PLAN_APPROVED_RATE_PRESENT_WHEN_FILING_FINAL",
+        "PA_PLAN_APPROVED_RATE_NOT_DEGENERATE",
+    ):
+        shipped = config.by_id(rule_id)
+        assert shipped is not None, rule_id
+        for plan in plans:
+            verdict, _, _, _ = evaluate(shipped, make_subject(plan, state="PA"), bundle)
+            assert verdict is Verdict.NOT_EVALUATED, (rule_id, verdict)
+
+
+# ---------------------------------------------------------------------------
 # CellError — the sharpest distinction in the phase
 # ---------------------------------------------------------------------------
 

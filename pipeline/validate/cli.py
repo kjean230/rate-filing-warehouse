@@ -37,6 +37,17 @@ They are different operations and the difference is which layer you are fixing:
 There is deliberately no `--reprocess source`. Re-fetching is Phase 1's job; doing
 it here would blur the layer boundary and hit two public state sites on a DQ
 iteration.
+
+---
+
+**Resolution and scope (Phase 5, ADR 0019).** A full-corpus run appends a
+`resolved` row for every finding that was open at the end of the previous
+full-corpus run and is not found again (ADR 0009 §6, now exercised), and gate
+assertion 7 refuses a run in which a finding vanished with neither. A `--filing`
+run writes its results with `scope: filing`: it resolves nothing (absence from a
+partial run proves nothing), skips the gate as before, and is never selected as the
+warehouse's current run — a `--filing` run that became "current" would erase every
+other filing's findings from the warehouse.
 """
 
 from __future__ import annotations
@@ -55,7 +66,12 @@ from pipeline.validate.config import (
     load_rules,
 )
 from pipeline.validate.gate import assert_dq_gate, assert_reasons_are_mapped
-from pipeline.validate.quarantine import DqGateViolation, QuarantineStore
+from pipeline.validate.quarantine import (
+    SCOPE_CORPUS,
+    SCOPE_FILING,
+    DqGateViolation,
+    QuarantineStore,
+)
 from pipeline.validate.runner import ValidationRunner, new_run_id
 from pipeline.validate.subjects import SubjectLoadError, load_bundles
 
@@ -149,12 +165,16 @@ def main(argv: list[str] | None = None) -> int:
 
     store = QuarantineStore(args.output_root)
     run_id = new_run_id(store.run_ids())
+    scope = SCOPE_FILING if args.filing else SCOPE_CORPUS
+    # The run to compute resolutions against: the latest full-corpus run before
+    # this one. None on the first run ever, and always None for a --filing run.
+    prior_run_id = None if args.filing else _prior_corpus_run(store, run_id)
     runner = ValidationRunner(
-        config=config, store=store, run_id=run_id, extract_root=args.extract_root
+        config=config, store=store, run_id=run_id, extract_root=args.extract_root, scope=scope
     )
 
     mode = f"  [reprocess: {args.reprocess}]" if args.reprocess else ""
-    print(f"run_id {run_id}{mode}")
+    print(f"run_id {run_id}{mode}  scope {scope}")
     print(
         f"rules  {len(config.rules)}  filings {len(bundles)}  "
         f"plans {sum(len(b.plans) for b in bundles)}  "
@@ -162,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         f"justifications {sum(len(b.justifications) for b in bundles)}"
     )
 
-    results = runner.run(bundles, field_misses)
+    results = runner.run(bundles, field_misses, prior_run_id=prior_run_id)
     _report(results)
 
     totals = store.summary(run_id)
@@ -175,28 +195,44 @@ def main(argv: list[str] | None = None) -> int:
         f"quarantine  {totals['violated']} found here + {totals['adopted']} adopted "
         f"from extraction = {totals['violated'] + totals['adopted']} row(s)"
     )
+    if prior_run_id is None:
+        print("resolutions  n/a (no prior full-corpus run, or single-filing scope)")
+    else:
+        print(
+            f"resolutions  {totals['resolved']} finding(s) open after run {prior_run_id} "
+            f"cleared by this run (resolved rows appended; originals kept)"
+        )
 
     if args.filing or args.no_gate:
         print("\ngate: not asserted (single-filing or --no-gate)")
         return store.exit_code(run_id)
 
     try:
-        assert_dq_gate(store, config, run_id=run_id, field_miss_count=len(field_misses))
+        assert_dq_gate(
+            store, config, run_id=run_id, field_miss_count=len(field_misses),
+            prior_run_id=prior_run_id,
+        )
     except DqGateViolation as exc:
         print(f"\nGATE FAILED:\n  {exc}", file=sys.stderr)
         return 3
     print(
-        f"\ngate: PASS — every quarantined row names a rule, and all "
+        f"\ngate: PASS — every quarantined row names a rule, all "
         f"{len(config.rules)} rules reported"
+        + (", and no finding vanished unresolved" if prior_run_id else "")
     )
     return store.exit_code(run_id)
+
+
+def _prior_corpus_run(store: QuarantineStore, run_id: str) -> str | None:
+    earlier = [run for run in store.corpus_run_ids() if run < run_id]
+    return max(earlier) if earlier else None
 
 
 def _report(results: list) -> None:
     print()
     header = (
         f"{'rule':42s} {'sev':5s} {'eval':>5s} {'pass':>5s} "
-        f"{'viol':>5s} {'n/a':>5s} {'skip':>5s} {'adopt':>5s}"
+        f"{'viol':>5s} {'n/a':>5s} {'skip':>5s} {'adopt':>5s} {'rslvd':>5s}"
     )
     print(header)
     print("-" * len(header))
@@ -204,7 +240,7 @@ def _report(results: list) -> None:
         print(
             f"{result.rule_id:42s} {result.severity:5s} {result.evaluated:5d} "
             f"{result.passed:5d} {result.violated:5d} {result.inapplicable:5d} "
-            f"{result.not_evaluated:5d} {result.adopted:5d}"
+            f"{result.not_evaluated:5d} {result.adopted:5d} {result.resolved:5d}"
         )
 
 

@@ -22,6 +22,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from pipeline.cdc.normalize import NORMALIZED_HASH_VERSION, normalized_field_hash
 from pipeline.extract.config import ExtractConfig
 from pipeline.extract.costlog import CostLog
 from pipeline.extract.documents import ResolvedDocument, resolve_documents
@@ -131,6 +132,12 @@ class ExtractionRunner:
         self.cost_log = cost_log
         self.run_id = run_id
 
+    @property
+    def _dry_run(self) -> bool:
+        """Whether this run skips the API — read off the client, which is the one
+        object that actually decides it, so there is exactly one definition."""
+        return bool(getattr(self.client, "dry_run", False))
+
     # -- driver --------------------------------------------------------------
 
     def run(self, manifest: Any, *, only_filing: str | None = None) -> RunResult:
@@ -150,6 +157,8 @@ class ExtractionRunner:
                 reason="document_resolution_failed",
                 error_class="pipeline.extract.documents.DocumentResolutionError",
                 error_detail=reason,
+                normalized_hash_version=NORMALIZED_HASH_VERSION,
+                dry_run=self._dry_run,
             )
             self.ledger.record(outcome)
             result.outcomes.append(outcome)
@@ -168,6 +177,8 @@ class ExtractionRunner:
                     document_role=document.document_role,
                     exc=exc,
                     stored_path=document.stored_path,
+                    dry_run=self._dry_run,
+                    normalized_hash_version=NORMALIZED_HASH_VERSION,
                 )
             else:
                 outcome.duration_ms = int(
@@ -282,7 +293,8 @@ class ExtractionRunner:
         plans = [
             self._plan_from_workbook(document, column) for column in read.plans
         ]
-        result.plans.extend(p for p in plans if p is not None)
+        kept_plans = [p for p in plans if p is not None]
+        result.plans.extend(kept_plans)
 
         for miss in missed:
             self.ledger.record_miss(miss)
@@ -292,10 +304,12 @@ class ExtractionRunner:
             OutcomeStatus.EXTRACTED if not missed else OutcomeStatus.PARTIAL,
             reason=None if not missed else f"{len(missed)} filing field(s) unavailable",
             filing_rows=1,
-            plan_rows=len([p for p in plans if p is not None]),
+            plan_rows=len(kept_plans),
             fields_targeted=len(targeted),
             fields_populated=len(values),
             fields_missed=len(missed),
+            filing=filing,
+            plans=kept_plans,
         )
 
     def _plan_from_workbook(
@@ -384,6 +398,7 @@ class ExtractionRunner:
         populated += len(llm_values)
 
         filing_rows = 0
+        filing: FilingExtract | None = None
         if document.document_role in ("filing_packet", "rate_request"):
             filing, enforced_notes = self._build_filing(
                 document, anchor_values, anchor_prov, cross_checks, llm_values, llm_prov
@@ -394,6 +409,7 @@ class ExtractionRunner:
             notes.extend(_disagreements(filing, cross_checks))
 
         plan_rows = 0
+        plans: list[PlanRateExtract] = []
         if document.document_role == "filing_packet":
             plans, warnings, rejected = self._extract_pa_plans(document, doc, cross_checks)
             result.plans.extend(plans)
@@ -464,6 +480,8 @@ class ExtractionRunner:
             fields_missed=len(missed),
             plan_count_stated=stated_plan_count,
             call_ids=call_ids,
+            filing=filing,
+            plans=plans,
         )
 
     def _run_anchors(
@@ -941,7 +959,15 @@ class ExtractionRunner:
         error_class: str | None = None,
         error_detail: str | None = None,
         call_ids: list[str] | None = None,
+        filing: FilingExtract | None = None,
+        plans: list[PlanRateExtract] | None = None,
     ) -> ExtractionOutcome:
+        # Signal 3 is measured HERE — on the rows this document produced, at the
+        # moment they were produced — for the same reason content_hash is recorded
+        # on this row: the ledger is the layer that read the bytes. Justifications
+        # are not passed in and LLM-read fields are filtered out inside the hash
+        # (pipeline/cdc/normalize.py); a skipped or failed document hashes to None.
+        field_hash, field_count = normalized_field_hash(filing, plans or [])
         return ExtractionOutcome(
             run_id=self.run_id,
             filing_id=document.filing_id,
@@ -962,6 +988,10 @@ class ExtractionRunner:
             error_class=error_class,
             error_detail=error_detail,
             llm_call_ids=call_ids or [],
+            normalized_field_hash=field_hash,
+            normalized_hash_version=NORMALIZED_HASH_VERSION,
+            normalized_field_count=field_count,
+            dry_run=self._dry_run,
         )
 
     def _miss(
