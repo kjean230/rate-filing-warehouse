@@ -478,9 +478,9 @@ class DagRun:
         if any(self.env.get(name) for name in API_KEY_VARS):
             return None
         return (
-            "ANTHROPIC_API_KEY is not set (the extract CLI does not read .env; the runner loads it "
-            "and children inherit). Export it, or set it in .env, and re-run. The DAG never runs a "
-            "dry extract: a dry run cannot make a stale filing current (ADR 0017 decision 5)."
+            "ANTHROPIC_API_KEY is not set — neither exported nor in .env (the runner loads .env "
+            "once and children inherit it). Set it and re-run. The DAG never runs a dry extract: "
+            "a dry run cannot make a stale filing current (ADR 0017 decision 5)."
         )
 
     def _extract_node(self, node: str, argv: list[str], *, filing_id: str | None) -> int | None:

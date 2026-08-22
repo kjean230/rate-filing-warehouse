@@ -270,3 +270,6 @@ with the same lock and the same record (`dag = "warehouse"`). *Rejected:* deleti
 - Left as they were, on purpose: `pipeline/extract/cli.py` still does not read `.env` (the
   runner loads it once and children inherit — the DAG closes the trap; the one-liner for
   manual runs is Phase 2 debt); `--reprocess extracted` remains the path for rule edits.
+  *Closeout, 2026-08-22: the one-liner landed — `python -m pipeline.extract` now calls
+  `load_dotenv()` like the ingest and load CLIs, with a test (`tests/extract/test_cli.py`);
+  the runner still loads `.env` once so dbt, which never reads it, inherits `POSTGRES_*`.*

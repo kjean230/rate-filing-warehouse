@@ -66,7 +66,7 @@ manifest row and no new directory; changed bytes get both.
 ### Tests
 
 ```bash
-pytest              # 590 offline tests, including every phase gate
+pytest              # 591 offline tests, including every phase gate
 pytest -m warehouse # 8 against the local Postgres container (POSTGRES_PORT if not 5432)
 pytest -m live      # 4 opt-in probes against the real sources (discovery only)
 ruff check .        # the only thing enforcing the declared Python 3.11 floor
@@ -370,8 +370,9 @@ rfp-warehouse        # the tail only: load → dbt build (after a model edit, or
 ```
 
 Run from the repository root (every CLI uses repo-relative defaults). The runner loads `.env`
-once and every child inherits it — dbt (`POSTGRES_PORT`) and the extract CLI
-(`ANTHROPIC_API_KEY`) read only the environment. The DAG never runs a dry extract (a dry run
+once and every child inherits it — dbt (`POSTGRES_PORT`) reads only the environment, and the
+API-key precheck needs `ANTHROPIC_API_KEY` before any extract node is spawned (the Python CLIs
+also load `.env` themselves for manual runs). The DAG never runs a dry extract (a dry run
 cannot make a stale filing current, ADR 0017) and never a `--filing` validate (never current,
 ADR 0019): both are impossible by construction in the argv builders, and tested. Nothing is
 retried at this level; a plain re-run resumes by construction (conditional GETs, detect skips

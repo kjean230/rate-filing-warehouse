@@ -12,10 +12,12 @@ Preflight, in this order, before any node runs:
 1. **The repo root.** Every CLI the DAG wraps uses repo-relative defaults (`config/dq_rules.yml`,
    `config/extraction_targets.yml`, `dbt/`), so the runner refuses to start anywhere else
    rather than letting the third node fail on a missing config file.
-2. **`.env`, loaded once.** dbt reads `POSTGRES_*` only from the environment and the extract
-   CLI reads `ANTHROPIC_API_KEY` only from the environment — neither reads `.env` (the loader
-   does). `load_dotenv()` here puts the file into this process's environment and every child
-   inherits it. `load_dotenv` never overrides a variable already set, so an exported value wins.
+2. **`.env`, loaded once.** dbt reads `POSTGRES_*` only from the environment — it never reads
+   `.env`. `load_dotenv()` here puts the file into this process's environment and every child
+   inherits it, so dbt sees the same `POSTGRES_*` the Python CLIs do (they load `.env`
+   themselves for manual runs), and the API-key precheck below sees `ANTHROPIC_API_KEY`
+   before any extract node is spawned. `load_dotenv` never overrides a variable already set,
+   so an exported value wins.
 3. **The lock** (driver.py / record.py) — one active run per data root.
 
 The API key is checked only once detect says an extract node will run: ingest needs no key,
