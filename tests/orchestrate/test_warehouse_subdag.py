@@ -101,6 +101,17 @@ def test_the_warehouse_parser_has_no_offline_flag() -> None:
     assert cli.build_parser(DAG_FULL).parse_args(["--offline"]).offline is True
 
 
+def test_no_parser_exposes_continue_on_failure() -> None:
+    """`RunOptions.continue_on_failure` exists for the isolation test only — its False branch is
+    Airflow's default `all_success`, shown there to break the gate. Production never sets it and
+    neither CLI may grow a flag for it (ADR 0020; the Phase 6 closeout names this as a trap)."""
+    for dag in (DAG_FULL, DAG_WAREHOUSE):
+        for flag in ("--continue-on-failure", "--no-continue-on-failure"):
+            with pytest.raises(SystemExit):
+                cli.build_parser(dag).parse_args([flag])
+    assert RunOptions().continue_on_failure is True
+
+
 def test_preflight_names_what_is_missing(tmp_path) -> None:
     problem = cli.preflight_repo_root(tmp_path)
     assert problem and "config/dq_rules.yml" in problem and "dbt/dbt_project.yml" in problem

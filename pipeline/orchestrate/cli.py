@@ -70,7 +70,11 @@ def build_parser(dag: str = DAG_FULL) -> argparse.ArgumentParser:
             prog="rfp-warehouse",
             description="The tail of the DAG only: load data/ into raw, then dbt build.",
         )
-    parser.add_argument("--data-root", type=Path, default=Path("data"))
+    parser.add_argument(
+        "--data-root", type=Path, default=Path("data"),
+        help="The data root (default: data). The run record is written under "
+        "{data-root}/orchestration/.",
+    )
     return parser
 
 

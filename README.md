@@ -66,7 +66,7 @@ manifest row and no new directory; changed bytes get both.
 ### Tests
 
 ```bash
-pytest              # 589 offline tests, including every phase gate
+pytest              # 590 offline tests, including every phase gate
 pytest -m warehouse # 8 against the local Postgres container (POSTGRES_PORT if not 5432)
 pytest -m live      # 4 opt-in probes against the real sources (discovery only)
 ruff check .        # the only thing enforcing the declared Python 3.11 floor
@@ -253,6 +253,10 @@ docker compose up -d
 rfp-warehouse        # load data/ into raw, then dbt build — 148 models, tests and unit tests
 ```
 
+Since Phase 6, `rfp-warehouse` is the tail of the DAG through the same driver — the same lock
+and the same per-node record under `data/orchestration/` (ADR 0020 decision 12). Use it alone
+after a model edit or a `--reprocess extracted`; `rfp-run` runs it at the end of every run.
+
 ### Measured on the current corpus
 
 | | |
@@ -280,6 +284,10 @@ a change signal must be a function of the source, not of the sampler. See
 [docs/cdc-comparison.md](docs/cdc-comparison.md).
 
 ### Run
+
+By hand, in this order — or, since Phase 6, `rfp-run` does all four as one DAG (ingest first,
+then detect → per-filing extract → re-detect → validate → load → dbt build); the list stays as
+the statement of what the command does and as the manual path:
 
 ```bash
 rfp-cdc detect                          # classify every document's latest sighting; list stale filings
